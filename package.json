@@ -3,25 +3,14 @@
     "version": "1.0.0",
     "main": "src/main.ts",
     "scripts": {
-        "start": "ts-node src/main.ts",
+        "start": "npx ts-node src/main.ts",
         "dev": "nodemon src/main.ts",
         "build": "tsc",
         "lint": "prettier --write \"src/**/*.ts\""
     },
     "engines": {
-        "node": ">=12.5.0",
-        "yarn": ">=1.17.3"
+        "node": ">=16.0.0"
     },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/consumet/consumet.ts.git"
-    },
-    "author": "prince-ao <princead@tutanota.com>",
-    "license": "MIT",
-    "bugs": {
-        "url": "https://github.com/consumet/consumet.ts/issues"
-    },
-    "homepage": "https://github.com/consumet/consumet.ts#readme",
     "dependencies": {
         "@consumet/extensions": "github:consumet/consumet.ts",
         "@fastify/cors": "^8.5.0",
@@ -35,11 +24,11 @@
         "ioredis": "^5.2.4",
         "reconnecting-websocket": "^4.4.0",
         "ts-node": "^10.9.1",
+        "typescript": "5.3.3",
         "ws": "^8.8.1"
     },
     "devDependencies": {
         "nodemon": "3.0.1",
-        "prettier": "^3.0.0",
-        "typescript": "5.3.3"
+        "prettier": "^3.0.0"
     }
 }
