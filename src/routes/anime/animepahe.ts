@@ -4,22 +4,27 @@ import chalk from 'chalk';
 
 const routes = async (fastify: FastifyInstance, options: any) => {
 
-  // --- HELPER: LAZY LOAD PROVIDERS (Saves RAM & Fixes Typos) ---
+  // --- HELPER: LAZY LOAD PROVIDERS ---
   const getProvider = (name: string) => {
       try {
           if (name === 'kai') return new ANIME.AnimeKai();
           if (name === 'hianime') return new ANIME.Hianime();
           if (name === 'pahe') return new ANIME.AnimePahe();
           if (name === 'gogo') {
-              // 🟢 FORCE TYPESCRIPT TO IGNORE MISSING TYPE
+              // 🟢 TRY MULTIPLE WAYS TO LOAD GOGO
               try {
                   // @ts-ignore
-                  return new (ANIME as any).Gogoanime();
-              } catch (e) {
-                  // Fallback: Load via require
+                  if ((ANIME as any).Gogoanime) return new (ANIME as any).Gogoanime();
+                  // @ts-ignore
+                  if ((ANIME as any).GogoAnime) return new (ANIME as any).GogoAnime();
+                  
+                  // Fallback: Load via require (Render specific path)
                   // @ts-ignore
                   const Gogo = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
                   return new Gogo();
+              } catch (e) {
+                  console.error(chalk.red("Gogo Load Failed:"), e);
+                  throw e;
               }
           }
       } catch (e) {
@@ -28,7 +33,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       }
   };
 
-  // --- HELPER: SAFE RUNNER (Prevents 502 Crashes) ---
+  // --- HELPER: SAFE RUNNER ---
   const safeRun = async (providerName: string, action: string, fn: (p: any) => Promise<any>, reply: any) => {
     try {
         console.log(chalk.blue(`[${providerName}] Request: ${action}...`));
@@ -36,8 +41,8 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const provider = getProvider(providerName.toLowerCase());
         if (!provider) throw new Error(`${providerName} could not be initialized.`);
 
-        // Set a timeout of 15 seconds to prevent freezing
-        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out (15s)")), 15000));
+        // 🟢 INCREASED TIMEOUT TO 60 SECONDS (Fixes Hianime Timeout)
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out (60s)")), 60000));
         const result = await Promise.race([fn(provider), timeout]);
 
         console.log(chalk.green(`   -> [${providerName}] Success!`));
@@ -45,24 +50,21 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
     } catch (e: any) {
         console.error(chalk.red(`   -> ❌ [${providerName}] Failed:`), e.message);
-        // Send 200 with empty results instead of 500/502 so frontend keeps trying others
+        // Send 200 with empty results so frontend keeps trying others
         return reply.status(200).send({ error: e.message, results: [] }); 
     }
   };
 
   // --- ROUTES ---
 
-  // AnimeKai
   fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', `Watch ${req.params.episodeId}`, (p) => p.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Gogoanime
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', `Watch ${req.params.episodeId}`, (p) => p.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Hianime
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', `Watch ${req.params.episodeId}`, async (p) => {
@@ -73,7 +75,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     throw new Error("No servers found");
   }, res));
 
-  // AnimePahe
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', `Watch ${req.params.episodeId}`, (p) => {
@@ -82,7 +83,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return p.fetchEpisodeSources(id);
   }, res));
 
-  // --- PROXY HANDLER (Universal) ---
+  // --- PROXY HANDLER ---
   fastify.get('/proxy', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
         const { url } = request.query as { url: string };
