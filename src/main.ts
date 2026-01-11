@@ -19,7 +19,9 @@ import Utils from './utils';
 
 // --- CONFIGURATION ---
 const PORT = Number(process.env.PORT) || 3000;
-const REDIS_TTL = Number(process.env.REDIS_TTL) || 3600;
+
+// ✅ FIXED: Added 'export' so other files can see it
+export const REDIS_TTL = Number(process.env.REDIS_TTL) || 3600;
 
 // --- REDIS SETUP (Optional) ---
 let redis: Redis | undefined;
@@ -46,7 +48,7 @@ const fastify = Fastify({
 
 (async () => {
     try {
-        // 1. Register CORS (Allows your frontend to talk to this API)
+        // 1. Register CORS
         await fastify.register(FastifyCors, {
             origin: '*',
             methods: ['GET'],
@@ -63,7 +65,7 @@ const fastify = Fastify({
         await fastify.register(news, { prefix: '/news' });
         await fastify.register(Utils, { prefix: '/utils' });
 
-        // 3. Base Route (Health Check)
+        // 3. Base Route
         fastify.get('/', (_, reply) => {
             reply.status(200).send({
                 message: 'Welcome to Nika API! 🚀',
@@ -76,7 +78,6 @@ const fastify = Fastify({
         });
 
         // 4. Start Server
-        // 0.0.0.0 is CRITICAL for Render/Public access
         await fastify.listen({ port: PORT, host: '0.0.0.0' });
         console.log(chalk.green(`🚀 Server is running on port ${PORT}`));
 
@@ -86,7 +87,6 @@ const fastify = Fastify({
     }
 })();
 
-// Export for Serverless (Optional, keeps Vercel compatibility)
 export default async function handler(req: any, res: any) {
     await fastify.ready();
     fastify.server.emit('request', req, res);
