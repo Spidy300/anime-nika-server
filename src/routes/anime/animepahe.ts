@@ -2,31 +2,49 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 
+// --- DIAGNOSTIC: SEE WHAT WE ACTUALLY HAVE ---
+console.log(chalk.yellow("\n🔍 [DIAGNOSTIC] Available Providers in ANIME:"));
+try {
+    console.log(Object.keys(ANIME).join(", "));
+} catch (e) { console.log("Could not list providers."); }
+console.log("\n");
+
 const routes = async (fastify: FastifyInstance, options: any) => {
 
   // --- HELPER: LAZY LOAD PROVIDERS ---
   const getProvider = (name: string) => {
       try {
           if (name === 'kai') return new ANIME.AnimeKai();
-          if (name === 'hianime') return new ANIME.Hianime();
           if (name === 'pahe') return new ANIME.AnimePahe();
           
+          // Hianime / Zoro Fallback
+          if (name === 'hianime') {
+              try { return new ANIME.Hianime(); } 
+              catch(e) { 
+                  // @ts-ignore
+                  if (ANIME.Zoro) return new ANIME.Zoro(); 
+              }
+          }
+          
           if (name === 'gogo') {
-              // 🔴 BRUTE FORCE GOGO LOADER
+              // 🟢 ROBUST GOGO LOADING
               try {
-                  // Attempt 1: Standard Import
+                  // Strategy 1: Standard
                   // @ts-ignore
                   if (ANIME.Gogoanime) return new ANIME.Gogoanime();
-              } catch (e) { console.log("Gogo Attempt 1 failed"); }
-
-              try {
-                  // Attempt 2: Direct Class Import (Render/Linux specific)
+                  
+                  // Strategy 2: Capitalized
                   // @ts-ignore
-                  const GogoClass = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
-                  return new GogoClass();
-              } catch (e) { console.log("Gogo Attempt 2 failed"); }
+                  if (ANIME.GogoAnime) return new ANIME.GogoAnime();
 
-              throw new Error("Gogoanime failed to load in all attempts.");
+                  // Strategy 3: Require (Common in Node envs)
+                  const Gogo = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
+                  return new Gogo();
+
+              } catch (e) { 
+                  console.error(chalk.red("Gogo Load Failed:"), e); 
+              }
+              throw new Error("Gogoanime not found.");
           }
       } catch (e) {
           console.error(chalk.red(`Failed to load ${name}:`), e);
@@ -42,7 +60,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const provider = getProvider(providerName.toLowerCase());
         if (!provider) throw new Error(`${providerName} could not be initialized.`);
 
-        // 60s Timeout
+        // 60s Timeout for slow scrapers
         const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out (60s)")), 60000));
         const result = await Promise.race([fn(provider), timeout]);
 
@@ -51,6 +69,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
     } catch (e: any) {
         console.error(chalk.red(`   -> ❌ [${providerName}] Failed:`), e.message);
+        // Return 200 with empty results so frontend keeps searching
         return reply.status(200).send({ error: e.message, results: [] }); 
     }
   };
@@ -68,9 +87,9 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   
-  // 🟢 HIANIME FIX: Add "megacloud" to the server list
+  // 🟢 HIANIME FIX: Try VidCloud specifically (often bypasses blocks better than MegaCloud)
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', `Watch ${req.params.episodeId}`, async (p) => {
-    const servers = ["megacloud", "vidstreaming", "vidcloud", "streamsb", "streamtape"];
+    const servers = ["vidcloud", "megacloud", "vidstreaming", "streamtape"];
     for (const server of servers) { 
         try { 
             console.log(`Trying Hianime Server: ${server}...`);
