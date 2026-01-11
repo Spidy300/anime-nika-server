@@ -7,24 +7,26 @@ const hianime = new ANIME.Hianime();
 const animepahe = new ANIME.AnimePahe();
 const animekai = new ANIME.AnimeKai(); 
 
-// --- ROBUST GOGO LOADER ---
+// --- ROBUST GOGO LOADER (Fixed for TypeScript) ---
 let gogo: any;
 try {
-    // Try standard load
-    gogo = new ANIME.Gogoanime();
+    // 🟢 FORCE TYPESCRIPT TO IGNORE "Property does not exist"
+    // @ts-ignore
+    if ((ANIME as any).Gogoanime) {
+        // @ts-ignore
+        gogo = new (ANIME as any).Gogoanime();
+    } else {
+        throw new Error("Gogoanime not found in ANIME export");
+    }
     console.log(chalk.green("✅ Gogoanime loaded successfully!"));
 } catch (e) {
-    console.log(chalk.red("⚠️ Standard Gogo load failed. Trying fallback..."));
+    console.log(chalk.yellow("⚠️ Standard Gogo load failed. Trying direct require..."));
     try {
-        // Try fallback load (common in some environments)
+        // Fallback: Load directly from the file system
         // @ts-ignore
-        if (ANIME.Gogoanime) gogo = new ANIME.Gogoanime();
-        else {
-             // @ts-ignore
-            const GogoClass = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
-            gogo = new GogoClass();
-        }
-        console.log(chalk.green("✅ Gogoanime fallback loaded!"));
+        const GogoClass = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
+        gogo = new GogoClass();
+        console.log(chalk.green("✅ Gogoanime loaded via fallback!"));
     } catch (err) {
         console.error(chalk.red("❌ Gogoanime COMPLETELY failed to load."));
     }
@@ -32,13 +34,12 @@ try {
 
 const routes = async (fastify: FastifyInstance, options: any) => {
 
-  // --- PROXY HANDLER (Fixes 403 Errors) ---
+  // --- PROXY HANDLER ---
   const proxyHandler = async (request: FastifyRequest, reply: FastifyReply) => {
     try {
         const { url } = request.query as { url: string };
         if (!url) return reply.status(400).send("Missing URL");
 
-        // Universal Catch-All Logic
         let referer = "https://animekai.to/"; 
         if (url.includes("uwucdn") || url.includes("kwik") || url.includes("owocdn")) referer = "https://kwik.cx/";
         else if (url.includes("gogocdn") || url.includes("goload") || url.includes("gogohd")) referer = "https://gogotaku.info/";
@@ -53,7 +54,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         
         if (!response.ok) return reply.status(response.status).send(`Upstream Error: ${response.statusText}`);
 
-        // Rewriter for M3U8
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("mpegurl") || url.includes(".m3u8")) {
             const text = await response.text();
@@ -82,7 +82,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         console.log(chalk.blue(`[${providerName}] ${action}...`));
         const res = await fn();
-        console.log(chalk.green(`   -> Success (${Array.isArray(res.results) ? res.results.length + ' results' : 'OK'})`));
+        console.log(chalk.green(`   -> Success`));
         reply.send(res);
     } catch (e: any) {
         console.error(chalk.red(`   -> ❌ ERROR in ${providerName} ${action}:`), e.message);
@@ -90,14 +90,12 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // --- ROUTE DEFINITIONS ---
+  // --- ROUTES ---
 
-  // AnimeKai
   fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', `Searching: ${req.params.query}`, () => animekai.search(req.params.query), res));
   fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', `Info: ${req.params.id}`, () => animekai.fetchAnimeInfo(req.params.id), res));
   fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', `Watch: ${req.params.episodeId}`, () => animekai.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Gogoanime
   fastify.get('/gogo/search/:query', (req: any, res) => {
       if(!gogo) return res.status(500).send({error: "Gogo not loaded"});
       safeRun('Gogo', `Searching: ${req.params.query}`, () => gogo.search(req.params.query), res)
@@ -111,7 +109,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       safeRun('Gogo', `Watch: ${req.params.episodeId}`, () => gogo.fetchEpisodeSources(req.params.episodeId), res)
   });
 
-  // Hianime
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Searching: ${req.params.query}`, () => hianime.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info: ${req.params.id}`, () => hianime.fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', async (req: any, res) => {
@@ -125,7 +122,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     res.status(500).send({error: "All servers failed"});
   });
 
-  // AnimePahe
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', `Searching: ${req.params.query}`, () => animepahe.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', `Info: ${req.params.id}`, () => animepahe.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => {
