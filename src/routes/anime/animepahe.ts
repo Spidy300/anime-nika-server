@@ -10,22 +10,23 @@ const routes = async (fastify: FastifyInstance, options: any) => {
           if (name === 'kai') return new ANIME.AnimeKai();
           if (name === 'hianime') return new ANIME.Hianime();
           if (name === 'pahe') return new ANIME.AnimePahe();
+          
           if (name === 'gogo') {
-              // 🟢 TRY MULTIPLE WAYS TO LOAD GOGO
+              // 🔴 BRUTE FORCE GOGO LOADER
               try {
+                  // Attempt 1: Standard Import
                   // @ts-ignore
-                  if ((ANIME as any).Gogoanime) return new (ANIME as any).Gogoanime();
+                  if (ANIME.Gogoanime) return new ANIME.Gogoanime();
+              } catch (e) { console.log("Gogo Attempt 1 failed"); }
+
+              try {
+                  // Attempt 2: Direct Class Import (Render/Linux specific)
                   // @ts-ignore
-                  if ((ANIME as any).GogoAnime) return new (ANIME as any).GogoAnime();
-                  
-                  // Fallback: Load via require (Render specific path)
-                  // @ts-ignore
-                  const Gogo = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
-                  return new Gogo();
-              } catch (e) {
-                  console.error(chalk.red("Gogo Load Failed:"), e);
-                  throw e;
-              }
+                  const GogoClass = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
+                  return new GogoClass();
+              } catch (e) { console.log("Gogo Attempt 2 failed"); }
+
+              throw new Error("Gogoanime failed to load in all attempts.");
           }
       } catch (e) {
           console.error(chalk.red(`Failed to load ${name}:`), e);
@@ -41,7 +42,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const provider = getProvider(providerName.toLowerCase());
         if (!provider) throw new Error(`${providerName} could not be initialized.`);
 
-        // 🟢 INCREASED TIMEOUT TO 60 SECONDS (Fixes Hianime Timeout)
+        // 60s Timeout
         const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out (60s)")), 60000));
         const result = await Promise.race([fn(provider), timeout]);
 
@@ -50,7 +51,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
     } catch (e: any) {
         console.error(chalk.red(`   -> ❌ [${providerName}] Failed:`), e.message);
-        // Send 200 with empty results so frontend keeps trying others
         return reply.status(200).send({ error: e.message, results: [] }); 
     }
   };
@@ -67,10 +67,16 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
+  
+  // 🟢 HIANIME FIX: Add "megacloud" to the server list
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', `Watch ${req.params.episodeId}`, async (p) => {
-    const servers = ["vidstreaming", "vidcloud", "streamsb", "streamtape"];
+    const servers = ["megacloud", "vidstreaming", "vidcloud", "streamsb", "streamtape"];
     for (const server of servers) { 
-        try { return await p.fetchEpisodeSources(req.params.episodeId, server); } catch (e) {} 
+        try { 
+            console.log(`Trying Hianime Server: ${server}...`);
+            const data = await p.fetchEpisodeSources(req.params.episodeId, server);
+            if(data && data.sources) return data;
+        } catch (e) {} 
     }
     throw new Error("No servers found");
   }, res));
@@ -83,7 +89,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return p.fetchEpisodeSources(id);
   }, res));
 
-  // --- PROXY HANDLER ---
+  // --- PROXY HANDLER (Universal) ---
   fastify.get('/proxy', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
         const { url } = request.query as { url: string };
