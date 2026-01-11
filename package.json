@@ -3,7 +3,7 @@
     "version": "1.0.0",
     "main": "src/main.ts",
     "scripts": {
-        "start": "npx ts-node src/main.ts",
+        "start": "node -r ts-node/register src/main.ts",
         "dev": "nodemon src/main.ts",
         "build": "tsc",
         "lint": "prettier --write \"src/**/*.ts\""
