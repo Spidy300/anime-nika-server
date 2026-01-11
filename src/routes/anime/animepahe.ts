@@ -4,18 +4,20 @@ import chalk from 'chalk';
 
 const routes = async (fastify: FastifyInstance, options: any) => {
 
-  // --- HELPER: LAZY LOAD PROVIDERS (Saves RAM) ---
+  // --- HELPER: LAZY LOAD PROVIDERS (Saves RAM & Fixes Typos) ---
   const getProvider = (name: string) => {
       try {
           if (name === 'kai') return new ANIME.AnimeKai();
           if (name === 'hianime') return new ANIME.Hianime();
           if (name === 'pahe') return new ANIME.AnimePahe();
           if (name === 'gogo') {
-              // 🟢 FORCE LOAD GOGO (Bypasses TypeScript issues)
+              // 🟢 FORCE TYPESCRIPT TO IGNORE MISSING TYPE
               try {
-                  return new ANIME.Gogoanime();
+                  // @ts-ignore
+                  return new (ANIME as any).Gogoanime();
               } catch (e) {
-                  // Fallback for different environments
+                  // Fallback: Load via require
+                  // @ts-ignore
                   const Gogo = require('@consumet/extensions/dist/providers/anime/gogoanime').default;
                   return new Gogo();
               }
@@ -92,7 +94,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
         const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0" } });
         
-        // Forward Headers (Fixes CORS)
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
 
