@@ -87,58 +87,64 @@ class CustomGogo {
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-
-        // 🟢 LAYER 1: DIRECT DOWNLOAD WITH REFERER (The Fix)
-        // We act like a real browser coming from the episode page
-        const downloadMirrors = [
-            `https://gogohd.net/download?id=${episodeId}`,
-            `https://goload.io/download?id=${episodeId}`,
-            `https://anitaku.so/download?id=${episodeId}`
-        ];
-
-        for (const url of downloadMirrors) {
+        for (const domain of this.mirrors) {
             try {
-                // IMPORTANT: Send the episode page as the Referer
-                const referer = `https://gogoanimes.fi/${episodeId}`; 
-                console.log(chalk.gray(`      Trying download page: ${url}`));
-                
-                const html = await fetchShield(url, referer);
+                const html = await fetchShield(`${domain}/${episodeId}`);
+                if (!html) continue;
+
                 const $ = cheerio.load(html);
-                
-                let bestUrl = "";
-                $('.mirror_link .dowload a, .dowload a').each((i, el) => {
-                    const href = $(el).attr('href');
-                    const text = $(el).text().toUpperCase();
-                    if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
-                        if (!bestUrl || text.includes("1080")) bestUrl = href;
-                    }
+
+                // 🟢 STRATEGY: SHOTGUN IFRAME SCANNER
+                // Grab EVERY iframe on the page and scan it.
+                const iframes: string[] = [];
+                $('iframe').each((i, el) => {
+                    const src = $(el).attr('src');
+                    if (src && src.startsWith('http')) iframes.push(src);
+                    else if (src && src.startsWith('//')) iframes.push('https:' + src);
                 });
 
-                if (bestUrl) {
-                    console.log(chalk.green(`      🎉 LOCAL SUCCESS: ${bestUrl}`));
-                    return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
+                // Also check data-video attributes (often used for Vidcdn)
+                $('[data-video]').each((i, el) => {
+                    const src = $(el).attr('data-video');
+                    if (src && src.startsWith('http')) iframes.push(src);
+                    else if (src && src.startsWith('//')) iframes.push('https:' + src);
+                });
+
+                // Remove duplicates
+                const uniqueIframes = [...new Set(iframes)];
+                console.log(chalk.gray(`      Found ${uniqueIframes.length} potential players. Scanning...`));
+
+                for (const iframe of uniqueIframes) {
+                    try {
+                        // Skip ads/trackers
+                        if (iframe.includes('facebook') || iframe.includes('google') || iframe.includes('disqus')) continue;
+
+                        console.log(chalk.gray(`      Scanning: ${iframe}`));
+                        const playerHtml = await fetchShield(iframe, domain); // Use Proxy
+
+                        // 1. Look for M3U8
+                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
+                        if (m3u8Match && m3u8Match[1]) {
+                            console.log(chalk.green(`      🎉 FOUND M3U8: ${m3u8Match[1]}`));
+                            return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
+                        }
+
+                        // 2. Look for MP4
+                        const mp4Match = playerHtml.match(/(https?:\/\/[^"']+\.mp4[^"']*)/);
+                        if (mp4Match && mp4Match[1]) {
+                            console.log(chalk.green(`      🎉 FOUND MP4: ${mp4Match[1]}`));
+                            return { sources: [{ url: mp4Match[1], quality: 'default', isM3U8: false }] };
+                        }
+
+                    } catch (e) {
+                        // Ignore scan errors, keep trying others
+                    }
                 }
-            } catch (e) {}
-        }
 
-        // 🟢 LAYER 2: NEW BACKUP API (AMVSTR)
-        // If local fails, use this reliable public API
-        try {
-            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Trying Amvstr API...`));
-            const amvstrUrl = `https://api.amvstr.me/api/v2/stream/${episodeId}`;
-            const res = await fetch(amvstrUrl);
-            const data = await res.json() as any; // Type assertion to bypass TS check
-            
-            if (data && data.stream && data.stream.multi && data.stream.multi.main && data.stream.multi.main.url) {
-                const streamUrl = data.stream.multi.main.url;
-                console.log(chalk.green(`      🎉 AMVSTR SUCCESS: ${streamUrl}`));
-                return { sources: [{ url: streamUrl, quality: 'default', isM3U8: streamUrl.includes('m3u8') }] };
-            }
-        } catch (e) {
-            console.log(chalk.red(`      ⚠️ Amvstr failed: ${e}`));
+            } catch(e) {}
         }
-
-        throw new Error("Gogo Watch Failed - All strategies exhausted");
+        
+        throw new Error("Gogo Watch Failed - No direct links found");
     }
 }
 
@@ -161,7 +167,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Catch-all
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
