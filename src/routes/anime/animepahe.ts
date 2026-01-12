@@ -18,7 +18,7 @@ async function fetchShield(targetUrl: string, referer?: string) {
 }
 
 class CustomGogo {
-    mirrors = ["https://gogoanimes.fi", "https://anitaku.pe", "https://gogoanime3.co"];
+    mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
     async search(query: string) {
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -94,36 +94,38 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 STRATEGY 1: LOOSE SELECTOR FOR DOWNLOAD PAGE
-                // Find ANY link that contains the word "Download" (Case insensitive)
+                // 🟢 1. ROBUST DOWNLOAD FINDER
+                // Instead of classes, look for the WORD "Download" in any link
                 let downloadLink = "";
                 $('a').each((i, el) => {
-                    const text = $(el).text().toLowerCase();
-                    if (text.includes("download")) {
+                    const text = $(el).text().trim().toUpperCase();
+                    if (text.includes("DOWNLOAD")) {
                         const href = $(el).attr('href');
-                        if (href && (href.includes('gogohd') || href.includes('goload'))) {
+                        if (href && href.startsWith('http')) {
                             downloadLink = href;
-                            return false; // Break loop
+                            return false; // Stop searching
                         }
                     }
                 });
                 
                 if (downloadLink) {
-                    if (!downloadLink.startsWith('http')) downloadLink = downloadLink.startsWith('//') ? 'https:' + downloadLink : domain + downloadLink;
                     console.log(chalk.green(`      Found Download Page: ${downloadLink}`));
                     
                     try {
                         const dlHtml = await fetchShield(downloadLink, domain);
                         const $dl = cheerio.load(dlHtml);
                         
-                        // Scan ALL links on download page for MP4
                         let bestUrl = "";
+                        
+                        // Scan the download page for MP4s
                         $dl('a').each((i, el) => {
                              const href = $dl(el).attr('href');
-                             const text = $dl(el).text().toLowerCase();
-                             if (href && (href.endsWith('.mp4') || text.includes('download') || text.includes('hdp'))) {
-                                 // Prefer Highest Quality
-                                 if (!bestUrl || text.includes('1080') || text.includes('720')) {
+                             const text = $dl(el).text().toUpperCase();
+                             
+                             // We want reliable storage servers like "gofile", "mp4upload", or direct links
+                             if (href && (text.includes('1080') || text.includes('720') || text.includes('360') || text.includes('DOWNLOAD'))) {
+                                 // Prioritize 1080p
+                                 if (!bestUrl || text.includes('1080')) {
                                      bestUrl = href;
                                  }
                              }
@@ -131,14 +133,15 @@ class CustomGogo {
 
                         if (bestUrl) {
                              console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
+                             // Return as direct file (isM3U8: false)
                              return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
                         }
                     } catch (e) {
-                         console.log(chalk.yellow(`      ⚠️ Download Strategy Failed: ${e}`));
+                         console.log(chalk.yellow(`      ⚠️ Download Page Scan Failed: ${e}`));
                     }
                 }
 
-                // 🟢 STRATEGY 2: IFRAME SCANNING (Fallback)
+                // 🟢 2. BACKUP: Regex Scan on Iframe (If download fails)
                 console.log(chalk.gray("      Falling back to Iframe Scan..."));
                 let iframe = $('iframe').first().attr('src');
                 
