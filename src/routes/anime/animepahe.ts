@@ -3,15 +3,17 @@ import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// --- SHOTGUN GOGO SCRAPER ---
+// --- TOTAL SHOTGUN GOGO SCRAPER ---
 class CustomGogo {
-    // 🟢 TRY ALL THESE MIRRORS
+    // 🟢 EXTENDED MIRROR LIST
     mirrors = [
-        "https://anitaku.so",       // Mirror 1
-        "https://gogoanime.hu",     // Mirror 2
-        "https://gogoanime.cl",     // Mirror 3
-        "https://gogoanime3.co",    // Mirror 4
-        "https://anitaku.pe"        // Mirror 5
+        "https://anitaku.so",       
+        "https://gogoanime3.co",
+        "https://gogoanimes.fi",
+        "https://gogoanime.hu",
+        "https://anitaku.pe",
+        "https://gogoanime.cl",
+        "https://gogoanime.tel"
     ];
 
     // Helper: Tries all mirrors until one gives valid HTML
@@ -19,7 +21,7 @@ class CustomGogo {
         for (const domain of this.mirrors) {
             try {
                 const targetUrl = `${domain}${path}`;
-                console.log(chalk.yellow(`   ...trying ${targetUrl}`));
+                // console.log(chalk.gray(`   ...trying ${targetUrl}`)); 
 
                 const res = await fetch(targetUrl, {
                     headers: {
@@ -30,9 +32,10 @@ class CustomGogo {
 
                 if (res.ok) {
                     const html = await res.text();
-                    // Check for Cloudflare Captcha
+                    // Check for Cloudflare/WAF blocks
                     if (!html.includes("Just a moment") && !html.includes("Verify you are human") && !html.includes("WAF")) {
-                        return { html, domain }; // Success!
+                        console.log(chalk.green(`   -> Got data from ${domain}`));
+                        return { html, domain }; 
                     }
                 }
             } catch (e) {}
@@ -42,6 +45,7 @@ class CustomGogo {
 
     async search(query: string) {
         try {
+            // 1. Try Normal Search
             const { html } = await this.fetchHTML(`/search.html?keyword=${encodeURIComponent(query)}`);
             const $ = cheerio.load(html);
             const results: any[] = [];
@@ -53,21 +57,28 @@ class CustomGogo {
                 if (id && title) results.push({ id, title, image });
             });
 
-            // Fallback: Guess ID
+            // 2. Intelligent Fallback (ID Guessing)
             if (results.length === 0) {
                 console.log(chalk.yellow("   -> Gogo Search empty. Forcing ID match..."));
                 const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
                 
-                // Validate guess
+                // Verify the guess exists using Shotgun fetch
                 try {
                     const { html: infoHtml } = await this.fetchHTML(`/category/${guessId}`);
                     const $info = cheerio.load(infoHtml);
                     const title = $info('.anime_info_body_bg h1').text().trim();
-                    if (title) results.push({ id: guessId, title, image: "", releaseDate: "Direct Match" });
+                    if (title) {
+                         results.push({ 
+                             id: guessId, 
+                             title: title, 
+                             image: $info('.anime_info_body_bg img').attr('src'), 
+                             releaseDate: "Direct Match" 
+                         });
+                    }
                 } catch(e) {}
             }
             return { results };
-        } catch (e) {
+        } catch (e) { 
              const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
              return { results: [{ id: guessId, title: query, image: "", releaseDate: "Force Guess" }] };
         }
@@ -75,18 +86,19 @@ class CustomGogo {
 
     async fetchAnimeInfo(id: string) {
         try {
-            // Loop through mirrors to find the Info Page
-            const { html, domain } = await this.fetchHTML(`/category/${id}`);
+            // 🟢 USE SHOTGUN FETCH FOR INFO PAGE TOO
+            const { html } = await this.fetchHTML(`/category/${id}`);
             const $ = cheerio.load(html);
 
             const title = $('.anime_info_body_bg h1').text().trim();
+            const image = $('.anime_info_body_bg img').attr('src');
             const movie_id = $('#movie_id').attr('value');
             const alias = $('#alias_anime').attr('value');
             const ep_end = $('#episode_page a').last().attr('ep_end');
 
-            if (!title) throw new Error("Blocked");
+            if (!title) throw new Error("Anime info parse failed");
 
-            // Fetch Episodes (AJAX usually works if we have the movie_id)
+            // Fetch Episodes using AJAX
             const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
             const epRes = await fetch(ajaxUrl);
             const epHtml = await epRes.text();
@@ -99,17 +111,19 @@ class CustomGogo {
                 if (epId) episodes.push({ id: epId, number: Number(epNum) });
             });
 
-            console.log(chalk.green(`   -> Gogo Found ${episodes.length} episodes.`));
-            return { id, title, episodes: episodes.reverse() };
+            return { id, title, image, episodes: episodes.reverse() };
         } catch (e: any) { throw new Error("Gogo Info Failed: " + e.message); }
     }
 
     async fetchEpisodeSources(episodeId: string) {
         try {
+            // 🟢 USE SHOTGUN FETCH FOR WATCH PAGE
             const { html } = await this.fetchHTML(`/${episodeId}`);
             const $ = cheerio.load(html);
+            
             const iframe = $('iframe').first().attr('src');
             if (!iframe) throw new Error("No video frame found");
+
             return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
         } catch (e) { throw new Error("Gogo Watch Failed"); }
     }
@@ -161,7 +175,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        const response = await fetch(url, { headers: { 'Referer': 'https://anitaku.pe/', 'User-Agent': "Mozilla/5.0" } });
+        const response = await fetch(url, { headers: { 'Referer': 'https://anitaku.so/', 'User-Agent': "Mozilla/5.0" } });
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         reply.send(Buffer.from(await response.arrayBuffer()));
