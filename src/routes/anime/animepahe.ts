@@ -18,7 +18,6 @@ async function fetchShield(targetUrl: string, referer?: string) {
 }
 
 class CustomGogo {
-    // 🟢 UPDATED MIRRORS: Added new working domains
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
     async search(query: string) {
@@ -88,74 +87,60 @@ class CustomGogo {
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-        for (const domain of this.mirrors) {
+
+        // 🟢 STRATEGY 1: CONSTRUCT DIRECT DOWNLOAD URL (No guessing)
+        // We force the scraper to go to the known download server
+        const downloadMirrors = [
+            `https://gogohd.net/download?id=${episodeId}`,
+            `https://goload.io/download?id=${episodeId}`,
+            `https://anitaku.so/download?id=${episodeId}`
+        ];
+
+        for (const url of downloadMirrors) {
             try {
-                const html = await fetchShield(`${domain}/${episodeId}`);
-                if (!html) continue;
-
+                console.log(chalk.gray(`      Trying direct download page: ${url}`));
+                const html = await fetchShield(url);
                 const $ = cheerio.load(html);
-
-                // 🟢 STRATEGY 1: BRUTE FORCE IFRAME FINDER
-                // Find ANY iframe on the page. We don't care about class names anymore.
-                let iframeUrl = "";
-                $('iframe').each((i, el) => {
-                    const src = $(el).attr('src');
-                    // We only want video player iframes, usually they contain 'streaming', 'embed', or 'vid'
-                    if (src && (src.includes('streaming') || src.includes('embed') || src.includes('vid'))) {
-                        iframeUrl = src;
-                        return false; 
+                
+                let bestUrl = "";
+                
+                // Scan for MP4 links
+                $('.mirror_link .dowload a, .dowload a').each((i, el) => {
+                    const href = $(el).attr('href');
+                    const text = $(el).text().toUpperCase();
+                    
+                    if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
+                        // Prioritize 1080p > 720p > 480p
+                        if (!bestUrl || text.includes("1080")) bestUrl = href;
+                        else if (text.includes("720") && !bestUrl.includes("1080")) bestUrl = href;
                     }
                 });
 
-                if (iframeUrl) {
-                    if (iframeUrl.startsWith('//')) iframeUrl = 'https:' + iframeUrl;
-                    console.log(chalk.green(`      Found Player: ${iframeUrl}`));
-
-                    // 🟢 STRATEGY 2: THE URL HACK
-                    // Convert the streaming URL directly to the download URL.
-                    // Example: streaming.php?id=X -> download?id=X
-                    // This bypasses the player's security entirely.
-                    if (iframeUrl.includes('streaming.php') || iframeUrl.includes('embed.php') || iframeUrl.includes('load.php')) {
-                        const downloadUrl = iframeUrl.replace(/(streaming|embed|load)\.php/, 'download');
-                        console.log(chalk.green(`      ⚡ Hacking URL to: ${downloadUrl}`));
-                        
-                        try {
-                            const dlHtml = await fetchShield(downloadUrl, domain);
-                            const $dl = cheerio.load(dlHtml);
-                            
-                            let bestMp4 = "";
-                            $dl('a').each((i, el) => {
-                                const href = $dl(el).attr('href');
-                                const text = $dl(el).text().toUpperCase();
-                                if (href && (text.includes('1080') || text.includes('720') || text.includes('P'))) {
-                                    bestMp4 = href;
-                                }
-                            });
-
-                            if (bestMp4) {
-                                console.log(chalk.green(`      🎉 HACK SUCCESS: ${bestMp4}`));
-                                return { sources: [{ url: bestMp4, quality: 'default', isM3U8: false }] };
-                            }
-                        } catch(e) {
-                            console.log(chalk.yellow(`      ⚠️ Hack failed: ${e}`));
-                        }
-                    }
-
-                    // 🟢 STRATEGY 3: DEEP SCAN (Backup)
-                    console.log(chalk.gray("      Falling back to standard scan..."));
-                    const playerHtml = await fetchShield(iframeUrl, domain);
-                    
-                    // Super aggressive regex that catches almost anything resembling a video link
-                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
-                    if (m3u8Match && m3u8Match[1]) {
-                        console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
-                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
-                    }
+                if (bestUrl) {
+                    console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
+                    return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
                 }
-
-            } catch(e) {}
+            } catch (e) {}
         }
-        
+
+        // 🟢 STRATEGY 2: FAIL-SAFE PUBLIC API (Backup)
+        // If our scraping fails, ask a public API that works
+        try {
+            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling Public Backup API...`));
+            const backupUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
+            const res = await fetch(backupUrl);
+            const data = await res.json();
+            
+            if (data.sources && data.sources.length > 0) {
+                // Find the best quality source
+                const bestSource = data.sources.find((s: any) => s.quality === "1080p") || data.sources[0];
+                console.log(chalk.green(`      🎉 PUBLIC API SUCCESS: ${bestSource.url}`));
+                return { sources: [{ url: bestSource.url, quality: 'default', isM3U8: bestSource.isM3U8 }] };
+            }
+        } catch (e) {
+            console.log(chalk.red(`      ⚠️ Backup API failed: ${e}`));
+        }
+
         throw new Error("Gogo Watch Failed - All strategies exhausted");
     }
 }
