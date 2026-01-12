@@ -18,6 +18,7 @@ async function fetchShield(targetUrl: string, referer?: string) {
 }
 
 class CustomGogo {
+    // 🟢 UPDATED MIRRORS: Added new working domains
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
     async search(query: string) {
@@ -94,76 +95,68 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 STRATEGY 1: STRICT DOWNLOAD FINDER
-                // Only follow links that look like REAL download pages (gogohd, goload, etc)
-                let downloadLink = "";
-                $('a').each((i, el) => {
-                    const href = $(el).attr('href');
-                    const text = $(el).text().trim().toUpperCase();
-                    
-                    if (href && text.includes("DOWNLOAD")) {
-                        // Check for known valid domains to avoid junk like 9animeto
-                        if (href.includes('gogohd') || href.includes('goload') || href.includes('embtaku') || href.includes('download')) {
-                            downloadLink = href;
-                            return false; // Stop searching, we found a good one
-                        }
+                // 🟢 STRATEGY 1: BRUTE FORCE IFRAME FINDER
+                // Find ANY iframe on the page. We don't care about class names anymore.
+                let iframeUrl = "";
+                $('iframe').each((i, el) => {
+                    const src = $(el).attr('src');
+                    // We only want video player iframes, usually they contain 'streaming', 'embed', or 'vid'
+                    if (src && (src.includes('streaming') || src.includes('embed') || src.includes('vid'))) {
+                        iframeUrl = src;
+                        return false; 
                     }
                 });
-                
-                if (downloadLink) {
-                    if (!downloadLink.startsWith('http')) downloadLink = downloadLink.startsWith('//') ? 'https:' + downloadLink : domain + downloadLink;
-                    console.log(chalk.green(`      Found Valid Download Page: ${downloadLink}`));
-                    
-                    try {
-                        const dlHtml = await fetchShield(downloadLink, domain);
-                        const $dl = cheerio.load(dlHtml);
-                        let bestUrl = "";
+
+                if (iframeUrl) {
+                    if (iframeUrl.startsWith('//')) iframeUrl = 'https:' + iframeUrl;
+                    console.log(chalk.green(`      Found Player: ${iframeUrl}`));
+
+                    // 🟢 STRATEGY 2: THE URL HACK
+                    // Convert the streaming URL directly to the download URL.
+                    // Example: streaming.php?id=X -> download?id=X
+                    // This bypasses the player's security entirely.
+                    if (iframeUrl.includes('streaming.php') || iframeUrl.includes('embed.php') || iframeUrl.includes('load.php')) {
+                        const downloadUrl = iframeUrl.replace(/(streaming|embed|load)\.php/, 'download');
+                        console.log(chalk.green(`      ⚡ Hacking URL to: ${downloadUrl}`));
                         
-                        $dl('a').each((i, el) => {
-                             const href = $dl(el).attr('href');
-                             const text = $dl(el).text().toUpperCase();
-                             if (href && (href.endsWith('.mp4') || text.includes('DOWNLOAD') || text.includes('HDP'))) {
-                                 if (!bestUrl || text.includes('1080')) {
-                                     bestUrl = href;
-                                 }
-                             }
-                        });
+                        try {
+                            const dlHtml = await fetchShield(downloadUrl, domain);
+                            const $dl = cheerio.load(dlHtml);
+                            
+                            let bestMp4 = "";
+                            $dl('a').each((i, el) => {
+                                const href = $dl(el).attr('href');
+                                const text = $dl(el).text().toUpperCase();
+                                if (href && (text.includes('1080') || text.includes('720') || text.includes('P'))) {
+                                    bestMp4 = href;
+                                }
+                            });
 
-                        if (bestUrl) {
-                             console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
-                             return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
+                            if (bestMp4) {
+                                console.log(chalk.green(`      🎉 HACK SUCCESS: ${bestMp4}`));
+                                return { sources: [{ url: bestMp4, quality: 'default', isM3U8: false }] };
+                            }
+                        } catch(e) {
+                            console.log(chalk.yellow(`      ⚠️ Hack failed: ${e}`));
                         }
-                    } catch (e) {}
-                }
+                    }
 
-                // 🟢 STRATEGY 2: IFRAME SCAN (VIDCDN)
-                console.log(chalk.gray("      Falling back to Vidcdn Scan..."));
-                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video');
-                if (!iframe) iframe = $('iframe').first().attr('src');
-                
-                if (iframe) {
-                    if (iframe.startsWith('//')) iframe = 'https:' + iframe;
+                    // 🟢 STRATEGY 3: DEEP SCAN (Backup)
+                    console.log(chalk.gray("      Falling back to standard scan..."));
+                    const playerHtml = await fetchShield(iframeUrl, domain);
                     
-                    const playerHtml = await fetchShield(iframe, domain);
-                    
-                    // Regex for m3u8
-                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
+                    // Super aggressive regex that catches almost anything resembling a video link
+                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
                     if (m3u8Match && m3u8Match[1]) {
                         console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
                         return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                     }
                 }
 
-                // 🟢 STRATEGY 3: BACKUP LINK RETURN
-                // If we absolutely fail, return the download link itself (better than nothing)
-                if (downloadLink) {
-                     return { sources: [{ url: downloadLink, quality: 'backup', isM3U8: false }] };
-                }
-
             } catch(e) {}
         }
         
-        throw new Error("Gogo Watch Failed - No direct links found");
+        throw new Error("Gogo Watch Failed - All strategies exhausted");
     }
 }
 
