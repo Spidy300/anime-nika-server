@@ -5,22 +5,18 @@ import * as cheerio from 'cheerio';
 
 // --- ROBUST GOGO SCRAPER (Mirror Hopping) ---
 class CustomGogo {
-    // List of mirrors to try
+    // 🟢 CHANGED ORDER: gogoanime3.co is often friendlier to scrapers
     domains = [
-        "https://anitaku.pe",
         "https://gogoanime3.co",
-        "https://gogoanimes.fi",
-        "https://gogoanime.tel"
+        "https://anitaku.pe",
+        "https://gogoanimes.fi"
     ];
     
     currentBase = this.domains[0];
 
-    // Helper to fetch with iPhone headers
     async fetchWithPhone(url: string) {
-        // Try current domain first, if fail, switch domain
         for (const domain of this.domains) {
             try {
-                // Replace base URL if we switched mirrors
                 let targetUrl = url;
                 if (!url.includes(domain)) {
                     const path = url.replace(/^https?:\/\/[^\/]+/, '');
@@ -31,14 +27,13 @@ class CustomGogo {
                 
                 const res = await fetch(targetUrl, {
                     headers: {
-                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-                        'Referer': domain,
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': domain
                     }
                 });
                 
                 if (res.ok) {
-                    this.currentBase = domain; // Remember working domain
+                    this.currentBase = domain;
                     return await res.text();
                 }
             } catch (e) {}
@@ -52,6 +47,7 @@ class CustomGogo {
             const $ = cheerio.load(html);
             const results: any[] = [];
 
+            // 🟢 UPDATED SELECTOR for gogoanime3.co
             $('.last_episodes .items li').each((i, el) => {
                 const title = $(el).find('.name a').text().trim();
                 const id = $(el).find('.name a').attr('href')?.replace('/category/', '').trim();
@@ -61,9 +57,6 @@ class CustomGogo {
             });
 
             console.log(chalk.cyan(`   -> Parsed ${results.length} results from Gogo.`));
-            // Log Page Title if empty (Debug Cloudflare)
-            if (results.length === 0) console.log("   -> Page Title:", $('title').text().trim());
-
             return { results };
         } catch (e) { throw new Error("Gogo Search Failed"); }
     }
@@ -82,9 +75,10 @@ class CustomGogo {
             const movie_id = $('#movie_id').attr('value');
             const alias = $('#alias_anime').attr('value');
 
-            // Fetch list
+            // AJAX call to get episodes
             const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=${epStart}&ep_end=${epEnd}&id=${movie_id}&default_ep=${0}&alias=${alias}`;
-            const epHtml = await (await fetch(ajaxUrl)).text();
+            const epRes = await fetch(ajaxUrl);
+            const epHtml = await epRes.text();
             const $ep = cheerio.load(epHtml);
             const episodes: any[] = [];
 
@@ -134,12 +128,9 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         console.log(chalk.blue(`[${providerName}] Request: ${action}...`));
         const provider = getProvider(providerName.toLowerCase());
-        
-        // No timeout for custom Gogo (it handles its own retries)
         const result = await fn(provider); 
         console.log(chalk.green(`   -> [${providerName}] Success!`));
         return reply.send(result);
-
     } catch (e: any) {
         console.error(chalk.red(`   -> ❌ [${providerName}] Failed:`), e.message);
         return reply.status(200).send({ error: e.message, results: [] }); 
@@ -147,13 +138,11 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   };
 
   // --- ROUTES ---
-
-  // GOGO (Custom)
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', `Watch ${req.params.episodeId}`, (p) => p.fetchEpisodeSources(req.params.episodeId), res));
 
-  // OTHERS
+  // OTHERS (Hianime, Kai, Pahe - Same as before)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', `Watch ${req.params.episodeId}`, async (p) => {
@@ -188,7 +177,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         let referer = "https://gogoanime3.co/";
         if (url.includes("hianime")) referer = "https://hianime.to/";
 
-        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)" } });
+        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0" } });
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         const buffer = await response.arrayBuffer();
