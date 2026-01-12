@@ -94,8 +94,19 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 STRATEGY 1: THE DOWNLOAD PAGE BYPASS (Best Success Rate)
-                let downloadLink = $('.anime_video_body > .anime_muti_link > ul > li.dowloads > a').attr('href');
+                // 🟢 STRATEGY 1: LOOSE SELECTOR FOR DOWNLOAD PAGE
+                // Find ANY link that contains the word "Download" (Case insensitive)
+                let downloadLink = "";
+                $('a').each((i, el) => {
+                    const text = $(el).text().toLowerCase();
+                    if (text.includes("download")) {
+                        const href = $(el).attr('href');
+                        if (href && (href.includes('gogohd') || href.includes('goload'))) {
+                            downloadLink = href;
+                            return false; // Break loop
+                        }
+                    }
+                });
                 
                 if (downloadLink) {
                     if (!downloadLink.startsWith('http')) downloadLink = downloadLink.startsWith('//') ? 'https:' + downloadLink : domain + downloadLink;
@@ -104,16 +115,14 @@ class CustomGogo {
                     try {
                         const dlHtml = await fetchShield(downloadLink, domain);
                         const $dl = cheerio.load(dlHtml);
-                        let bestUrl = "";
                         
-                        // Scrape the download page for MP4 links
-                        $dl('.mirror_link .dowload a').each((i, el) => {
+                        // Scan ALL links on download page for MP4
+                        let bestUrl = "";
+                        $dl('a').each((i, el) => {
                              const href = $dl(el).attr('href');
-                             const text = $dl(el).text();
-                             
-                             // We want direct video files (MP4) or HDP links
-                             if (href && (text.includes('MP4') || text.includes('Download') || text.includes('HDP'))) {
-                                 // Prefer Highest Quality (1080 > 720 > 480)
+                             const text = $dl(el).text().toLowerCase();
+                             if (href && (href.endsWith('.mp4') || text.includes('download') || text.includes('hdp'))) {
+                                 // Prefer Highest Quality
                                  if (!bestUrl || text.includes('1080') || text.includes('720')) {
                                      bestUrl = href;
                                  }
@@ -131,7 +140,7 @@ class CustomGogo {
 
                 // 🟢 STRATEGY 2: IFRAME SCANNING (Fallback)
                 console.log(chalk.gray("      Falling back to Iframe Scan..."));
-                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video') || $('iframe').first().attr('src');
+                let iframe = $('iframe').first().attr('src');
                 
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
@@ -148,8 +157,6 @@ class CustomGogo {
             } catch(e) {}
         }
         
-        // 🔴 CRITICAL: Throw Error if nothing found. 
-        // DO NOT return a raw iframe URL, it causes the infinite load bug.
         throw new Error("Gogo Watch Failed - No direct links found");
     }
 }
