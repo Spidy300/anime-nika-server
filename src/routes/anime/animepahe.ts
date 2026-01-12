@@ -93,50 +93,64 @@ class CustomGogo {
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
-                
-                // 🟢 NEW STRATEGY: Find the "Vidstreaming" (vidcdn) server explicitly
-                // This is much more reliable than the default iframe
-                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video');
-                
-                // Fallback to default if vidcdn is missing
-                if (!iframe) iframe = $('iframe').first().attr('src');
 
+                // 🟢 STRATEGY 1: THE DOWNLOAD PAGE BYPASS (Best Success Rate)
+                let downloadLink = $('.anime_video_body > .anime_muti_link > ul > li.dowloads > a').attr('href');
+                
+                if (downloadLink) {
+                    if (!downloadLink.startsWith('http')) downloadLink = downloadLink.startsWith('//') ? 'https:' + downloadLink : domain + downloadLink;
+                    console.log(chalk.green(`      Found Download Page: ${downloadLink}`));
+                    
+                    try {
+                        const dlHtml = await fetchShield(downloadLink, domain);
+                        const $dl = cheerio.load(dlHtml);
+                        let bestUrl = "";
+                        
+                        // Scrape the download page for MP4 links
+                        $dl('.mirror_link .dowload a').each((i, el) => {
+                             const href = $dl(el).attr('href');
+                             const text = $dl(el).text();
+                             
+                             // We want direct video files (MP4) or HDP links
+                             if (href && (text.includes('MP4') || text.includes('Download') || text.includes('HDP'))) {
+                                 // Prefer Highest Quality (1080 > 720 > 480)
+                                 if (!bestUrl || text.includes('1080') || text.includes('720')) {
+                                     bestUrl = href;
+                                 }
+                             }
+                        });
+
+                        if (bestUrl) {
+                             console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
+                             return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
+                        }
+                    } catch (e) {
+                         console.log(chalk.yellow(`      ⚠️ Download Strategy Failed: ${e}`));
+                    }
+                }
+
+                // 🟢 STRATEGY 2: IFRAME SCANNING (Fallback)
+                console.log(chalk.gray("      Falling back to Iframe Scan..."));
+                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video') || $('iframe').first().attr('src');
+                
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
-                    console.log(chalk.green(`      Targeting Iframe: ${iframe}`));
+                    
+                    const playerHtml = await fetchShield(iframe, domain);
+                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
 
-                    try {
-                        const playerHtml = await fetchShield(iframe, domain);
-                        
-                        // 1. JWPlayer Sources Regex (Most common for Vidstreaming)
-                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
-                        if (jwMatch && jwMatch[1]) {
-                            const fileMatch = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
-                            if (fileMatch && fileMatch[1]) {
-                                console.log(chalk.green(`      🎉 JWPLAYER EXTRACT: ${fileMatch[1]}`));
-                                return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: true }] };
-                            }
-                        }
-
-                        // 2. Generic M3U8 Regex (Backup)
-                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
-                        if (m3u8Match && m3u8Match[1]) {
-                             console.log(chalk.green(`      🎉 GENERIC EXTRACT: ${m3u8Match[1]}`));
-                             return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
-                        }
-                        
-                        console.log(chalk.yellow(`      ⚠️ Extraction failed. Snippet: ${playerHtml.substring(0, 100)}`));
-
-                    } catch(err) {
-                        console.log(chalk.red(`      ⚠️ Extraction error: ${err}`));
+                    if (m3u8Match && m3u8Match[1]) {
+                        console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
+                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                     }
-
-                    // Fallback
-                    return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
                 }
+
             } catch(e) {}
         }
-        throw new Error("Gogo Watch Failed");
+        
+        // 🔴 CRITICAL: Throw Error if nothing found. 
+        // DO NOT return a raw iframe URL, it causes the infinite load bug.
+        throw new Error("Gogo Watch Failed - No direct links found");
     }
 }
 
