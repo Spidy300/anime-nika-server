@@ -5,7 +5,6 @@ import * as cheerio from 'cheerio';
 
 // --- MANUAL GOGO SCRAPER ---
 class CustomGogo {
-    // We use the main site. If search fails, we guess the ID.
     baseUrl = "https://anitaku.pe"; 
 
     async fetch(url: string) {
@@ -22,7 +21,6 @@ class CustomGogo {
     }
 
     async search(query: string) {
-        // 1. Try real search
         try {
             const html = await this.fetch(`${this.baseUrl}/search.html?keyword=${encodeURIComponent(query)}`);
             const $ = cheerio.load(html);
@@ -41,14 +39,13 @@ class CustomGogo {
                 const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
                 results.push({
                     id: guessId,
-                    title: query, // Use the user's query as title
-                    image: "https://gogocdn.net/cover/naruto-shippuden.png", // Placeholder/Generic
+                    title: query, 
+                    image: "https://gogocdn.net/cover/naruto-shippuden.png", 
                     releaseDate: "Guessed Match"
                 });
             }
             return { results };
         } catch (e) {
-            // Even on error, return the guess
             const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
             return { results: [{ id: guessId, title: query, image: "", releaseDate: "Error Fallback" }] };
         }
@@ -114,22 +111,27 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // 2. KAI (Fixing 404)
+  // 2. KAI
   fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().search(req.params.query), res));
   fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchAnimeInfo(req.params.id), res));
   fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchEpisodeSources(req.params.episodeId), res));
 
-  // 3. HIANIME
+  // 3. HIANIME (Fixed Typings)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', async () => {
     const p = new ANIME.Hianime();
     const servers = ["vidcloud", "megacloud", "vidstreaming"];
-    for (const server of servers) { try { return await p.fetchEpisodeSources(req.params.episodeId, server); } catch (e) {} }
+    for (const server of servers) { 
+        try { 
+            // 🟢 FIX: Added 'as any' to satisfy TypeScript strict mode
+            return await p.fetchEpisodeSources(req.params.episodeId, server as any); 
+        } catch (e) {} 
+    }
     throw new Error("No servers");
   }, res));
 
-  // 4. PAHE (Restored)
+  // 4. PAHE
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', () => new ANIME.AnimePahe().search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', () => new ANIME.AnimePahe().fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => {
