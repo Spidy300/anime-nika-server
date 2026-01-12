@@ -2,15 +2,13 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// Keep your worker proxy
 const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev"; 
 
 async function fetchShield(targetUrl: string, referer?: string) {
     let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
-    
-    // Mimic a standard browser to avoid basic blocks
+    // Mobile User-Agent to request simpler, unencrypted players
     fullUrl += `&headers=${encodeURIComponent(JSON.stringify({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
         'Referer': referer || 'https://gogoanimes.fi/'
     }))}`;
     
@@ -93,7 +91,7 @@ class CustomGogo {
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-        
+
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
@@ -101,63 +99,60 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 STEP 1: EXTRACT THE RAW ID
-                // We don't want the full URL yet, we just want the ID of the video (e.g. "MTIzNDU=")
-                // It's usually inside the iframe src URL: .../streaming.php?id=MTIzNDU=&...
-                let iframeSrc = $('iframe').first().attr('src') || "";
+                // 🟢 1. EXTRACT REAL ID (Fixing the garbage ID bug)
+                let iframeSrc = $('.anime_muti_link ul li.vidcdn a').attr('data-video') || $('iframe').first().attr('src') || "";
                 
-                // Also check specific buttons for the ID
-                const vidcdnSrc = $('li.vidcdn a').attr('data-video');
-                if (vidcdnSrc) iframeSrc = vidcdnSrc;
-
-                // Extract the ID parameter
-                const idMatch = iframeSrc.match(/[?&]id=([^&]+)/);
+                // Regex to grab only the Base64 ID (alphanumeric + =)
+                // Stops at & or ? to avoid grabbing junk like "?ep=8308"
+                const idMatch = iframeSrc.match(/[?&]id=([a-zA-Z0-9+=]+)/);
                 
                 if (idMatch && idMatch[1]) {
                     const cleanId = idMatch[1];
-                    console.log(chalk.green(`      Found Video ID: ${cleanId}`));
+                    console.log(chalk.green(`      Found Clean ID: ${cleanId}`));
 
-                    // 🟢 STEP 2: CONSTRUCT THE EMBTAKU URL
-                    // Instead of using the weird Gogo player, we go straight to the source
-                    const embtakuUrl = `https://embtaku.pro/streaming.php?id=${cleanId}`;
-                    console.log(chalk.gray(`      Force-Switching to: ${embtakuUrl}`));
+                    // 🟢 2. CONSTRUCT VIDSTREAMING URL
+                    const playerUrl = `https://embtaku.pro/streaming.php?id=${cleanId}`;
+                    const playerHtml = await fetchShield(playerUrl, domain);
 
-                    // 🟢 STEP 3: SCRAPE EMBTAKU
-                    try {
-                        const playerHtml = await fetchShield(embtakuUrl, domain);
-                        
-                        // Look for the "file": "..." pattern
-                        const fileMatch = playerHtml.match(/file:\s*['"]([^'"]+\.m3u8)['"]/);
-                        
-                        if (fileMatch && fileMatch[1]) {
-                            console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${fileMatch[1]}`));
-                            return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: true }] };
-                        }
-                        
-                        // Backup: Look for JWPlayer setup
-                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
-                        if (jwMatch && jwMatch[1]) {
-                             const jwFile = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
-                             if (jwFile && jwFile[1]) {
-                                 console.log(chalk.green(`      🎉 EXTRACTED JWPLAYER: ${jwFile[1]}`));
-                                 return { sources: [{ url: jwFile[1], quality: 'default', isM3U8: true }] };
-                             }
-                        }
-
-                        // 🟢 STEP 4: IFRAME FALLBACK
-                        // If we can't extract the link, return the cleaned Embtaku URL.
-                        // Many players CAN play this URL directly because it's a standard embed.
-                        console.log(chalk.yellow("      ⚠️ Extraction failed, returning clean Embed URL."));
-                        return { sources: [{ url: embtakuUrl, quality: 'iframe', isM3U8: false }] };
-
-                    } catch(err) {
-                        console.log(chalk.red(`      ⚠️ Embtaku Error: ${err}`));
+                    // 🟢 3. STRICT M3U8 SEARCH
+                    // Only accept strings ending in .m3u8
+                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
+                    
+                    if (m3u8Match && m3u8Match[1]) {
+                        console.log(chalk.green(`      🎉 FOUND VALID M3U8: ${m3u8Match[1]}`));
+                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                     }
+                    
+                    // 🟢 4. STRICT MP4 SEARCH (Legacy Fallback)
+                    const mp4Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.mp4)['"]/);
+                    if (mp4Match && mp4Match[1]) {
+                         console.log(chalk.green(`      🎉 FOUND VALID MP4: ${mp4Match[1]}`));
+                         return { sources: [{ url: mp4Match[1], quality: 'default', isM3U8: false }] };
+                    }
+                } else {
+                    console.log(chalk.yellow("      ⚠️ Could not extract clean ID from iframe."));
                 }
+
+                // 🟢 5. NEW BACKUP: VIDSTACK API
+                // If local scraping fails, try this dedicated Gogo scraper API
+                try {
+                    console.log(chalk.gray("      Trying Vidstack API..."));
+                    const vidstackUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
+                    const res = await fetch(vidstackUrl);
+                    if (res.ok) {
+                        const data = await res.json();
+                        // Validate the result!
+                        if (data.sources && data.sources[0] && data.sources[0].url.endsWith('.m3u8')) {
+                             console.log(chalk.green(`      🎉 VIDSTACK SUCCESS: ${data.sources[0].url}`));
+                             return { sources: [{ url: data.sources[0].url, quality: 'default', isM3U8: true }] };
+                        }
+                    }
+                } catch(e) {}
+
             } catch(e) {}
         }
         
-        throw new Error("Gogo Watch Failed - Could not find video ID");
+        throw new Error("Gogo Watch Failed - No playable video file found");
     }
 }
 
@@ -180,7 +175,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Catch-all
+  // Default
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
@@ -189,6 +184,12 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
+        
+        // 🟢 FIX: Do not proxy HTML pages as video
+        if (url.includes('.php') || url.includes('.html')) {
+             return reply.status(400).send("Proxy refused: Not a video file");
+        }
+
         const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
         const response = await fetch(fullUrl);
         reply.header("Access-Control-Allow-Origin", "*");
