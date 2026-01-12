@@ -5,12 +5,10 @@ import { ANIME } from '@consumet/extensions';
 
 // --- RENDER-OPTIMIZED PROXY TUNNEL ---
 async function fetchTunnel(targetUrl: string, retries = 2) {
-    // Render has 30-second request timeout, so we need faster proxies
     const proxies = [
         (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
         (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-        // Direct fetch as last resort (works on Render's servers)
-        (url: string) => url
+        (url: string) => url // Direct fetch as fallback
     ];
 
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -18,7 +16,7 @@ async function fetchTunnel(targetUrl: string, retries = 2) {
             try {
                 const proxyUrl = proxyFn(targetUrl);
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
+                const timeoutId = setTimeout(() => controller.abort(), 6000);
                 
                 const res = await fetch(proxyUrl, { 
                     signal: controller.signal,
@@ -32,10 +30,10 @@ async function fetchTunnel(targetUrl: string, retries = 2) {
                 
                 if (res.ok) {
                     const text = await res.text();
-                    if (text && text.length > 100) return text; // Valid response
+                    if (text && text.length > 100) return text;
                 }
             } catch (e) {
-                continue; // Try next proxy
+                continue;
             }
         }
     }
@@ -55,12 +53,8 @@ class CustomGogo {
     async search(query: string) {
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         
-        // Try real search with quick timeout for Render
-        for (const domain of this.domains.slice(0, 2)) { // Only try first 2 domains
+        for (const domain of this.domains.slice(0, 2)) {
             try {
-                const controller = new AbortController();
-                setTimeout(() => controller.abort(), 5000);
-                
                 const html = await fetchTunnel(`${domain}/search.html?keyword=${encodeURIComponent(query)}`);
                 if (!html) continue;
 
@@ -68,7 +62,7 @@ class CustomGogo {
                 const results: any[] = [];
                 
                 $('.items li').each((i, el) => {
-                    if (i >= 15) return false; // Limit results
+                    if (i >= 15) return false;
                     const $el = $(el);
                     const title = $el.find('.name a').text().trim();
                     const id = $el.find('.name a').attr('href')?.replace('/category/', '').trim();
@@ -86,7 +80,6 @@ class CustomGogo {
             }
         }
 
-        // Quick fallback
         return { 
             results: [{ 
                 id: guessId, 
@@ -98,7 +91,6 @@ class CustomGogo {
     }
 
     async fetchAnimeInfo(id: string) {
-        // Try only 2 domains to stay under Render timeout
         for (const domain of this.domains.slice(0, 2)) {
             try {
                 const html = await fetchTunnel(`${domain}/category/${id}`);
@@ -112,7 +104,6 @@ class CustomGogo {
 
                 if (!movie_id) continue;
 
-                // Quick episode fetch
                 const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
                 const epHtml = await fetchTunnel(ajaxUrl);
                 if (!epHtml) continue;
@@ -138,7 +129,6 @@ class CustomGogo {
     }
 
     async fetchEpisodeSources(episodeId: string) {
-        // Try only first domain for speed on Render
         for (const domain of this.domains.slice(0, 1)) {
             try {
                 const html = await fetchTunnel(`${domain}/${episodeId}`);
@@ -147,7 +137,6 @@ class CustomGogo {
                 const $ = cheerio.load(html);
                 const sources: any[] = [];
                 
-                // Extract iframe sources
                 $('iframe').each((i, el) => {
                     const src = $(el).attr('src');
                     if (src) {
@@ -233,10 +222,8 @@ class CustomPahe {
             );
             const html = await res.text();
             
-            // Extract Kwik or other streaming links
             const kwikMatch = html.match(/https?:\/\/kwik\.[a-z]+\/e\/[a-zA-Z0-9]+/);
             if (!kwikMatch) {
-                // Try alternate patterns
                 const altMatch = html.match(/https?:\/\/[a-z0-9.-]+\/e\/[a-zA-Z0-9]+/);
                 if (altMatch) {
                     return { sources: [{ url: altMatch[0], quality: '720p', isM3U8: false }] };
@@ -251,37 +238,42 @@ class CustomPahe {
     }
 }
 
-// --- RENDER-OPTIMIZED HIANIME ---
-class FixedHianime extends ANIME.Hianime {
-    async fetchEpisodeSources(episodeId: string, server?: any) {
-        // Only try most reliable servers to save time on Render
-        const serverOrder = ["megacloud", "vidstreaming"];
-        
-        for (const srv of serverOrder) {
-            try {
-                const controller = new AbortController();
-                setTimeout(() => controller.abort(), 8000);
-                
-                const result = await super.fetchEpisodeSources(episodeId, srv as any);
-                if (result && result.sources && result.sources.length > 0) {
-                    return result;
-                }
-            } catch (e) {
-                console.log(`   -> Server ${srv} failed`);
-                continue;
+// --- FIXED HIANIME WRAPPER (No Class Extension) ---
+async function fetchHianimeEpisodeSources(episodeId: string, server?: string) {
+    const hianime = new ANIME.Hianime();
+    const serverOrder = ["megacloud", "vidstreaming", "vidcloud", "streamtape"];
+    const serversToTry = server ? [server, ...serverOrder.filter(s => s !== server)] : serverOrder;
+    
+    for (const srv of serversToTry.slice(0, 2)) { // Only try 2 servers for speed
+        try {
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 8000);
+            
+            // Create a promise that will timeout
+            const fetchPromise = hianime.fetchEpisodeSources(episodeId, srv as any);
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), 8000)
+            );
+            
+            const result: any = await Promise.race([fetchPromise, timeoutPromise]);
+            
+            if (result && result.sources && result.sources.length > 0) {
+                console.log(`   -> Server ${srv} worked!`);
+                return result;
             }
+        } catch (e: any) {
+            console.log(`   -> Server ${srv} failed: ${e.message}`);
+            continue;
         }
-        
-        throw new Error("Hianime: No working servers (try Pahe provider)");
     }
+    
+    throw new Error("Hianime: No working servers (try Pahe provider)");
 }
 
 const customGogo = new CustomGogo();
 const customPahe = new CustomPahe();
-const fixedHianime = new FixedHianime();
 
 const routes = async (fastify: FastifyInstance, options: any) => {
-  // Render-aware error handler
   const safeRun = async (providerName: string, fn: () => Promise<any>, reply: any) => {
     const startTime = Date.now();
     
@@ -334,17 +326,17 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }, res)
   );
 
-  // HIANIME ROUTES
+  // HIANIME ROUTES (Using wrapper function instead of class)
   fastify.get('/hianime/search/:query', (req: any, res) => 
-    safeRun('Hianime', () => fixedHianime.search(req.params.query), res)
+    safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res)
   );
   
   fastify.get('/hianime/info/:id', (req: any, res) => 
-    safeRun('Hianime', () => fixedHianime.fetchAnimeInfo(req.params.id), res)
+    safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res)
   );
   
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => 
-    safeRun('Hianime', () => fixedHianime.fetchEpisodeSources(req.params.episodeId), res)
+    safeRun('Hianime', () => fetchHianimeEpisodeSources(req.params.episodeId, req.query.server), res)
   );
 
   // IMPROVED PROXY for Render
@@ -353,14 +345,13 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const { url } = req.query;
         if (!url) return reply.status(400).send({ error: "Missing URL parameter" });
         
-        // Determine referer based on URL
         let referer = "https://gogoanime3.co/";
         if (url.includes("kwik")) referer = "https://kwik.cx/";
         if (url.includes("hianime")) referer = "https://hianime.to/";
         if (url.includes("anitaku")) referer = "https://anitaku.to/";
 
         const controller = new AbortController();
-        setTimeout(() => controller.abort(), 12000); // 12s timeout for video files
+        setTimeout(() => controller.abort(), 12000);
 
         const response = await fetch(url, { 
             headers: { 
@@ -376,13 +367,11 @@ const routes = async (fastify: FastifyInstance, options: any) => {
             throw new Error(`Fetch failed: ${response.status}`);
         }
 
-        // Set CORS headers for Render
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Access-Control-Allow-Methods", "GET, OPTIONS");
         reply.header("Access-Control-Allow-Headers", "Content-Type, Range");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         
-        // Handle range requests for video streaming
         const range = response.headers.get("content-range");
         if (range) {
             reply.header("Content-Range", range);
@@ -413,13 +402,27 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   // Root endpoint
   fastify.get('/', async (req, reply) => {
     reply.send({
-      message: 'Anime API Server',
+      message: 'Anime API Server - Fixed & Optimized',
       endpoints: {
-        pahe: '/:query, /info/:id, /watch/:episodeId',
-        gogo: '/gogo/search/:query, /gogo/info/:id, /gogo/watch/:episodeId',
-        hianime: '/hianime/search/:query, /hianime/info/:id, /hianime/watch/:episodeId',
-        proxy: '/proxy?url=VIDEO_URL',
-        health: '/health'
+        pahe: {
+          search: '/:query',
+          info: '/info/:id',
+          watch: '/watch/:episodeId'
+        },
+        gogo: {
+          search: '/gogo/search/:query',
+          info: '/gogo/info/:id',
+          watch: '/gogo/watch/:episodeId'
+        },
+        hianime: {
+          search: '/hianime/search/:query',
+          info: '/hianime/info/:id',
+          watch: '/hianime/watch/:episodeId'
+        },
+        utility: {
+          proxy: '/proxy?url=VIDEO_URL',
+          health: '/health'
+        }
       }
     });
   });
