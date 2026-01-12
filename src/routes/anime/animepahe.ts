@@ -67,12 +67,8 @@ class CustomGogo {
                         
                         $ep('li').each((i, el) => {
                             let epId = $ep(el).find('a').attr('href')?.trim() || "";
-                            
-                            // 🟢 ID REPAIR LOGIC
-                            // 1. Remove leading slash
                             epId = epId.replace(/^\//, '');
-                            
-                            // 2. Fix broken IDs (e.g. "-episode-1" -> "naruto-shippuden-episode-1")
+                            // Auto-Repair Broken IDs
                             if (epId.startsWith('-') || (id && !epId.includes(id))) {
                                 const suffix = epId.replace(/^-+/, ''); 
                                 epId = `${id}-${suffix}`;
@@ -101,14 +97,35 @@ class CustomGogo {
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
-                
-                // 🟢 Better Selector: Avoid Ads, find the real video player
                 let iframe = $('.play-video iframe').attr('src') || $('#load_anime iframe').attr('src') || $('iframe').first().attr('src');
                 
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
-                    console.log(chalk.green(`      🎉 Found Iframe: ${iframe}`));
-                    return { sources: [{ url: iframe, quality: 'default', isM3U8: iframe.includes('.m3u8') }] };
+                    console.log(chalk.green(`      Found Iframe: ${iframe}`));
+
+                    // 🟢 DEEP EXTRACTION LOGIC
+                    // We try to fetch the Iframe content to find the REAL .m3u8 file
+                    try {
+                        console.log(chalk.gray(`      ⛏️  Digging for M3U8 inside iframe...`));
+                        const playerHtml = await fetchShield(iframe, domain); // Use domain as referer
+                        
+                        // Regex to find "file: '...m3u8'" or similar common patterns
+                        const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/.*\.m3u8)['"]/) || 
+                                          playerHtml.match(/source\s*:\s*['"](https?:\/\/.*\.m3u8)['"]/);
+
+                        if (m3u8Match && m3u8Match[1]) {
+                             const m3u8Url = m3u8Match[1];
+                             console.log(chalk.green(`      🎉 EXTRACTED DIRECT VIDEO: ${m3u8Url}`));
+                             return { sources: [{ url: m3u8Url, quality: 'default', isM3U8: true }] };
+                        } else {
+                            console.log(chalk.yellow(`      ⚠️ No M3U8 found in iframe code. Returning iframe as fallback.`));
+                        }
+                    } catch(err) {
+                        console.log(chalk.red(`      ⚠️ Extraction failed: ${err}`));
+                    }
+
+                    // Fallback: Return the Iframe (Frontend must handle it)
+                    return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
                 }
             } catch(e) {}
         }
@@ -131,11 +148,11 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
+  // Force Gogo logic
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Default routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
