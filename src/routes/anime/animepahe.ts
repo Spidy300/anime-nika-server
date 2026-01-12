@@ -14,15 +14,13 @@ async function fetchShield(targetUrl: string) {
     return await res.text();
 }
 
-// --- 1. SHOTGUN GOGO SCRAPER (Tries multiple mirrors via Shield) ---
+// --- 1. GOGO SCRAPER (Fixed AJAX Domain) ---
 class CustomGogo {
-    // We try all these. Usually at least one allows the Proxy.
     mirrors = [
+        "https://gogoanimes.fi", // Found success here in your logs
         "https://anitaku.pe",
         "https://gogoanime3.co",
-        "https://gogoanimes.fi",
-        "https://gogoanime.hu",
-        "https://anitaku.so"
+        "https://gogoanime.hu"
     ];
 
     async search(query: string) {
@@ -41,13 +39,10 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // Loop through mirrors until one works
         for (const domain of this.mirrors) {
             try {
-                // console.log(chalk.gray(`      Trying ${domain}...`));
                 const html = await fetchShield(`${domain}/category/${id}`);
                 
-                // Quick check if we got blocked
                 if (html.includes("WAF") || html.includes("Verify you are human")) continue;
 
                 const $ = cheerio.load(html);
@@ -58,8 +53,9 @@ class CustomGogo {
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id on ${domain}!`));
                     
-                    // Fetch Episodes via Shield
-                    const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                    // 🟢 FIX: Use 'gogo-load.com' instead of 'gogocdn.net'
+                    const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                    
                     const epHtml = await fetchShield(ajaxUrl);
                     const $ep = cheerio.load(epHtml);
                     const episodes: any[] = [];
@@ -68,9 +64,12 @@ class CustomGogo {
                         const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                         if (epId) episodes.push({ id: epId, number: Number(epNum) });
                     });
-                    return { id, title: id, episodes: episodes.reverse() };
+                    
+                    if (episodes.length > 0) return { id, title: id, episodes: episodes.reverse() };
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.log(chalk.yellow(`      -> Failed on ${domain}, trying next...`));
+            }
         }
         throw new Error("Gogo Info Failed (All mirrors blocked)");
     }
@@ -88,15 +87,27 @@ class CustomGogo {
     }
 }
 
-// --- 2. CUSTOM PAHE (Manual API) ---
+// --- 2. PAHE SCRAPER (Smart Search) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
     headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
 
     async search(query: string) {
         try {
-            const res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
-            const data: any = await res.json();
+            // Try Exact Query
+            let res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
+            let data: any = await res.json();
+
+            // 🟢 Fallback: If 0 results, try searching just the first word (e.g. "Naruto" instead of "Naruto Shippuden")
+            if (!data.data || data.data.length === 0) {
+                const firstWord = query.split(" ")[0];
+                if (firstWord && firstWord !== query) {
+                    console.log(chalk.yellow(`   -> Pahe: 0 results. Trying fallback: ${firstWord}`));
+                    res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(firstWord)}`, { headers: this.headers });
+                    data = await res.json();
+                }
+            }
+
             return { results: (data.data || []).map((i:any) => ({ id: i.session, title: i.title, image: i.poster })) };
         } catch (e) { return { results: [] }; }
     }
@@ -123,24 +134,15 @@ class CustomPahe {
     }
 }
 
-// --- 3. HIANIME MANUAL (Shielded) ---
-// We use the library for search/info, but manual shield for watch to bypass IP ban
+// --- 3. HIANIME (Standard) ---
 class ShieldedHianime {
     async fetchEpisodeSources(episodeId: string) {
-        try {
-            // Hianime often uses the format: anime-name-id?ep=...
-            // Standard library fails here on Render.
-            // We fallback to standard library but catch the error.
-            const p = new ANIME.Hianime();
-            const servers = ["vidcloud", "megacloud", "streamtape"];
-            for (const server of servers) { 
-                try { 
-                    const res = await p.fetchEpisodeSources(episodeId, server as any);
-                    if(res.sources) return res;
-                } catch (e) {} 
-            }
-            throw new Error("No servers");
-        } catch(e) { throw e; }
+        const p = new ANIME.Hianime();
+        const servers = ["vidcloud", "megacloud", "streamtape"];
+        for (const server of servers) { 
+            try { return await p.fetchEpisodeSources(episodeId, server as any); } catch (e) {} 
+        }
+        throw new Error("No servers");
     }
 }
 
@@ -161,12 +163,11 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // 1. GOGO (Shielded Shotgun)
+  // ROUTES
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // 2. PAHE (Manual)
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', () => customPahe.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', () => customPahe.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => {
@@ -174,20 +175,16 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return customPahe.fetchEpisodeSources(id);
   }, res));
 
-  // 3. HIANIME (Mixed)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', () => shieldedHianime.fetchEpisodeSources(req.params.episodeId), res));
 
-  // 4. PROXY ROUTE (Shielded)
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        
         const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
         const response = await fetch(fullUrl);
-        
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         reply.send(Buffer.from(await response.arrayBuffer()));
