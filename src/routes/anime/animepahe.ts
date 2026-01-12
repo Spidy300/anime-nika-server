@@ -2,11 +2,6 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 
-// --- DIAGNOSTIC START ---
-console.log(chalk.yellow("✨ Anime API Starting..."));
-console.log(chalk.yellow("   Available Providers:", Object.keys(ANIME).join(", ")));
-// ------------------------
-
 const routes = async (fastify: FastifyInstance, options: any) => {
 
   // --- HELPER: LAZY LOAD PROVIDERS ---
@@ -15,13 +10,17 @@ const routes = async (fastify: FastifyInstance, options: any) => {
           if (name === 'kai') return new ANIME.AnimeKai();
           if (name === 'pahe') return new ANIME.AnimePahe();
           
+          // 🟢 NEW: Add KickAssAnime
+          if (name === 'kickass') return new ANIME.KickAssAnime();
+
           if (name === 'hianime') {
-              // Create Hianime and try to spoof a real browser
-              const hi = new ANIME.Hianime();
-              return hi;
+              // Try Hianime, fallback to Zoro
+              try { return new ANIME.Hianime(); } 
+              catch(e) { 
+                  // @ts-ignore
+                  if (ANIME.Zoro) return new ANIME.Zoro(); 
+              }
           }
-          
-          // Removed Gogo logic since we confirmed it is missing from your library
       } catch (e) {
           console.error(chalk.red(`Failed to load ${name}:`), e);
           return null;
@@ -52,34 +51,29 @@ const routes = async (fastify: FastifyInstance, options: any) => {
 
   // --- ROUTES ---
 
+  // KICKASS ANIME (New!)
+  fastify.get('/kickass/search/:query', (req: any, res) => safeRun('KickAss', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
+  fastify.get('/kickass/info/:id', (req: any, res) => safeRun('KickAss', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
+  fastify.get('/kickass/watch/:episodeId', (req: any, res) => safeRun('KickAss', `Watch ${req.params.episodeId}`, (p) => p.fetchEpisodeSources(req.params.episodeId), res));
+
   // KAI
   fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
   fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', `Watch ${req.params.episodeId}`, (p) => p.fetchEpisodeSources(req.params.episodeId), res));
 
-  // HIANIME (The Main Focus)
+  // HIANIME
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', `Search ${req.params.query}`, (p) => p.search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', `Info ${req.params.id}`, (p) => p.fetchAnimeInfo(req.params.id), res));
-  
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', `Watch ${req.params.episodeId}`, async (p) => {
-    // Try multiple servers aggressively
     const servers = ["vidcloud", "megacloud", "vidstreaming", "streamtape"];
-    
     for (const server of servers) { 
         try { 
             console.log(chalk.yellow(`   ...trying Hianime server: ${server}`));
             const data = await p.fetchEpisodeSources(req.params.episodeId, server);
-            
-            // Check if we actually got sources back
-            if(data && data.sources && data.sources.length > 0) {
-                console.log(chalk.green(`   -> Got video from ${server}!`));
-                return data;
-            }
-        } catch (e: any) {
-            console.log(chalk.gray(`   - ${server} failed: ${e.message}`));
-        } 
+            if(data && data.sources && data.sources.length > 0) return data;
+        } catch (e) {} 
     }
-    throw new Error("No working servers found after trying all options.");
+    throw new Error("No working servers found.");
   }, res));
 
   // PAHE
@@ -91,27 +85,20 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return p.fetchEpisodeSources(id);
   }, res));
 
-  // --- PROXY HANDLER (Universal) ---
+  // --- PROXY ---
   fastify.get('/proxy', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
         const { url } = request.query as { url: string };
         if (!url) return reply.status(400).send("Missing URL");
-
-        let referer = "https://hianime.to/"; // Default to Hianime
-        if (url.includes("uwucdn") || url.includes("kwik")) referer = "https://kwik.cx/";
-        else if (url.includes("animekai")) referer = "https://animekai.to/";
-
-        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0" } });
+        
+        // Universal Referer strategy
+        const response = await fetch(url, { headers: { 'Referer': new URL(url).origin, 'User-Agent': "Mozilla/5.0" } });
         
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
-
         const buffer = await response.arrayBuffer();
         reply.send(Buffer.from(buffer));
-
-    } catch (error) {
-        reply.status(500).send({ error: "Proxy Error" });
-    }
+    } catch (error) { reply.status(500).send({ error: "Proxy Error" }); }
   });
 };
 
