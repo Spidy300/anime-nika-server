@@ -2,22 +2,35 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev"; 
+// 🟢 NEW PROXY LIST (The Tunnel)
+const PROXIES = [
+    "https://corsproxy.io/?", 
+    "https://api.allorigins.win/raw?url=", 
+    "https://api.codetabs.com/v1/proxy?quest="
+];
 
 async function fetchShield(targetUrl: string, referer?: string) {
-    let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
-    fullUrl += `&headers=${encodeURIComponent(JSON.stringify({
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
-        'Referer': referer || 'https://gogoanimes.fi/'
-    }))}`;
-    
+    // 1. Try Direct Connection (Fastest)
     try {
-        const res = await fetch(fullUrl);
-        if (!res.ok) throw new Error(`Shield Status: ${res.status}`);
-        return await res.text();
-    } catch (e) {
-        return "";
+        const res = await fetch(targetUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Referer': referer || 'https://gogoanimes.fi/'
+            }
+        });
+        if (res.ok) return await res.text();
+    } catch (e) {}
+
+    // 2. Try Proxy Tunnels (If blocked)
+    for (const proxy of PROXIES) {
+        try {
+            console.log(chalk.gray(`      🛡️ Tunneling via: ${proxy}`));
+            const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
+            if (res.ok) return await res.text();
+        } catch (e) {}
     }
+    
+    return "";
 }
 
 class CustomGogo {
@@ -98,69 +111,48 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 STRATEGY: MULTI-SERVER SWEEP
-                // Collect ALL available servers for this episode
-                const players: { name: string, url: string }[] = [];
-
-                // 1. Vidstreaming (Default)
-                const vidcdn = $('li.vidcdn a').attr('data-video');
-                if (vidcdn) players.push({ name: 'Vidstreaming', url: vidcdn });
-
-                // 2. StreamSB (Very Reliable Backup)
-                const streamsb = $('li.streamsb a').attr('data-video');
-                if (streamsb) players.push({ name: 'StreamSB', url: streamsb });
-
-                // 3. Xstream (Backup)
-                const xstream = $('li.xstreamcdn a').attr('data-video');
-                if (xstream) players.push({ name: 'Xstream', url: xstream });
-
-                // 4. Default Iframe (Fallback)
+                // 🟢 STRATEGY: SCAN ALL PLAYERS (Vidstreaming, StreamSB, etc)
+                const players: string[] = [];
+                
+                // Collect specific server links
+                $('li.vidcdn a, li.streamsb a, li.xstreamcdn a').each((i, el) => {
+                    const url = $(el).attr('data-video');
+                    if (url) players.push(url);
+                });
+                
+                // Fallback to default iframe
                 const defaultFrame = $('iframe').first().attr('src');
-                if (defaultFrame) players.push({ name: 'Default', url: defaultFrame });
+                if (defaultFrame) players.push(defaultFrame);
 
-                // 🟢 EXECUTE SWEEP
-                for (let player of players) {
-                    let url = player.url;
-                    if (url.startsWith('//')) url = 'https:' + url;
-                    
-                    console.log(chalk.gray(`      Scanning Server: [${player.name}] ${url}`));
+                // Remove duplicates and fix protocol
+                const uniquePlayers = [...new Set(players)].map(url => url.startsWith('//') ? 'https:' + url : url);
+
+                for (const playerUrl of uniquePlayers) {
+                    console.log(chalk.gray(`      Scanning Player: ${playerUrl}`));
 
                     try {
-                        const playerHtml = await fetchShield(url, domain);
-
-                        // 🔍 Check 1: M3U8 (Standard)
+                        const playerHtml = await fetchShield(playerUrl, domain);
+                        
+                        // 1. M3U8 Regex
                         const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
                         if (m3u8Match && m3u8Match[1]) {
-                            console.log(chalk.green(`      🎉 FOUND VIDEO on ${player.name}: ${m3u8Match[1]}`));
+                            console.log(chalk.green(`      🎉 FOUND M3U8: ${m3u8Match[1]}`));
                             return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                         }
 
-                        // 🔍 Check 2: MP4 (StreamSB/Legacy)
+                        // 2. MP4 Regex (Legacy/StreamSB)
                         const mp4Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.mp4)['"]/);
                         if (mp4Match && mp4Match[1]) {
-                             console.log(chalk.green(`      🎉 FOUND MP4 on ${player.name}: ${mp4Match[1]}`));
+                             console.log(chalk.green(`      🎉 FOUND MP4: ${mp4Match[1]}`));
                              return { sources: [{ url: mp4Match[1], quality: 'default', isM3U8: false }] };
                         }
-
-                        // 🔍 Check 3: JWPlayer Config
-                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
-                        if (jwMatch && jwMatch[1]) {
-                             const fileMatch = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
-                             if (fileMatch && fileMatch[1]) {
-                                 console.log(chalk.green(`      🎉 FOUND JWPLAYER on ${player.name}: ${fileMatch[1]}`));
-                                 return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: fileMatch[1].includes('.m3u8') }] };
-                             }
-                        }
-
-                    } catch (err) {
-                        // console.log(`      ⚠️ ${player.name} failed, trying next...`);
-                    }
+                    } catch (err) {}
                 }
 
             } catch(e) {}
         }
         
-        throw new Error("Gogo Watch Failed - All servers exhausted");
+        throw new Error("Gogo Watch Failed - All strategies exhausted");
     }
 }
 
@@ -183,19 +175,20 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Default
+  // Default routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
+  // Proxy Endpoint
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video URL");
+        // Block HTML/PHP to prevent playing error pages
+        if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
 
-        const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
-        const response = await fetch(fullUrl);
+        const response = await fetch(url);
         reply.header("Access-Control-Allow-Origin", "*");
         reply.send(Buffer.from(await response.arrayBuffer()));
     } catch (e) { reply.status(500).send({ error: "Proxy Error" }); }
