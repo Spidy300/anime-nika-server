@@ -1,37 +1,14 @@
 import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
-import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
+import { ANIME } from '@consumet/extensions';
 
-// --- PROXY HELPER ---
-async function fetchWithProxy(url: string, referer: string) {
-    try {
-        // 1. Try Direct
-        let res = await fetch(url, { 
-            headers: { 
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36', 
-                'Referer': referer 
-            } 
-        });
-        if(res.ok) {
-            const text = await res.text();
-            if(!text.includes("Just a moment") && !text.includes("Verify you are human")) return text;
-        }
-        
-        // 2. Fallback: Google Translate Proxy (Bypass Cloudflare)
-        console.log(chalk.yellow("   -> Direct failed. Engaging Google Proxy..."));
-        const proxyUrl = `https://translate.google.com/translate?sl=auto&tl=en&u=${encodeURIComponent(url)}`;
-        res = await fetch(proxyUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-        return await res.text();
-    } catch(e) { return ""; }
-}
-
-// --- CUSTOM GOGO ---
+// --- GOGO API BYPASS (No HTML Parsing) ---
 class CustomGogo {
-    baseUrl = "https://gogoanime3.co";
+    baseUrl = "https://anitaku.pe"; // Base for API calls
 
     async search(query: string) {
-        // Blind Trust: Always return a result
+        // Blind Trust: Always return a result so the user can click
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         return { 
             results: [{ 
@@ -44,44 +21,57 @@ class CustomGogo {
     }
 
     async fetchAnimeInfo(id: string) {
-        const text = await fetchWithProxy(`${this.baseUrl}/category/${id}`, this.baseUrl);
+        // 🟢 DIRECT API CALL: Bypass the "Category" page entirely
+        // We guess the movie_id is the same as the slug (often works) or try a standard range.
+        // For Naruto Shippuden, the ID is actually distinct, so we try a "brute force" approach on the episode loader.
         
-        const idMatch = text.match(/value="([^"]+)"\s*id="movie_id"/);
-        const aliasMatch = text.match(/value="([^"]+)"\s*id="alias_anime"/);
-        const epMatch = text.match(/ep_end\s*=\s*['"](\d+)['"]/);
+        try {
+            // Step 1: Try to fetch the episode list directly using the alias
+            // alias usually equals the ID (e.g. naruto-shippuden)
+            const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=5000&id=&default_ep=0&alias=${id}`;
+            
+            const res = await fetch(ajaxUrl);
+            if(!res.ok) throw new Error("API Blocked");
+            
+            const html = await res.text();
+            const $ = cheerio.load(html);
+            const episodes: any[] = [];
 
-        if (!idMatch) throw new Error("Gogo Blocked (Proxy Failed)");
+            $('li').each((i, el) => {
+                const epId = $(el).find('a').attr('href')?.trim().replace('/', '');
+                const epNum = $(el).find('.name').text().replace('EP ', '').trim();
+                if (epId) episodes.push({ id: epId, number: Number(epNum) });
+            });
 
-        const movie_id = idMatch[1];
-        const alias = aliasMatch ? aliasMatch[1] : id;
-        const ep_end = epMatch ? epMatch[1] : "1000";
+            if (episodes.length === 0) throw new Error("No episodes found");
 
-        // Fetch Episodes from AJAX
-        const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-        const epRes = await fetch(ajaxUrl);
-        const epHtml = await epRes.text();
-        
-        const $ = cheerio.load(epHtml);
-        const episodes: any[] = [];
-        $('li').each((i, el) => {
-            const epId = $(el).find('a').attr('href')?.trim().replace('/', '');
-            const epNum = $(el).find('.name').text().replace('EP ', '').trim();
-            if (epId) episodes.push({ id: epId, number: Number(epNum) });
-        });
-
-        return { id, title: id, episodes: episodes.reverse() };
+            return { id, title: id, episodes: episodes.reverse() };
+        } catch (e: any) {
+            console.log(chalk.red(`   -> Gogo API failed: ${e.message}`));
+            throw new Error("Gogo Info Failed");
+        }
     }
 
     async fetchEpisodeSources(episodeId: string) {
-        const text = await fetchWithProxy(`${this.baseUrl}/${episodeId}`, this.baseUrl);
-        const $ = cheerio.load(text);
-        const iframe = $('iframe').first().attr('src');
-        if (!iframe) throw new Error("Gogo Video Blocked");
-        return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
+        try {
+            // Fetch the embed page source directly
+            const res = await fetch(`${this.baseUrl}/${episodeId}`);
+            const html = await res.text();
+            
+            const $ = cheerio.load(html);
+            const iframe = $('iframe').first().attr('src');
+            
+            if (!iframe) throw new Error("No video iframe");
+            
+            // If it's a relative URL, fix it
+            const finalUrl = iframe.startsWith('//') ? `https:${iframe}` : iframe;
+            
+            return { sources: [{ url: finalUrl, quality: 'default', isM3U8: false }] };
+        } catch (e) { throw new Error("Gogo Watch Failed"); }
     }
 }
 
-// --- CUSTOM PAHE ---
+// --- PAHE SCRAPER (Improved Search) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
     headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
@@ -105,8 +95,8 @@ class CustomPahe {
 
     async fetchEpisodeSources(episodeId: string) {
         try {
-            if(!episodeId.includes("*")) throw new Error("Invalid ID format");
-            const [animeId, epId] = episodeId.split("*");
+            if(!episodeId.includes("*") && !episodeId.includes("~")) throw new Error("Invalid ID");
+            const [animeId, epId] = episodeId.replace("~", "*").split("*");
             
             const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
             const html = await res.text();
@@ -135,7 +125,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // 1. GOGO
+  // 1. GOGO (Priority)
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
@@ -148,7 +138,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return customPahe.fetchEpisodeSources(id);
   }, res));
 
-  // 3. HIANIME (Standard)
+  // 3. HIANIME (Backup)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', async () => {
@@ -157,11 +147,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     for (const server of servers) { try { return await p.fetchEpisodeSources(req.params.episodeId, server as any); } catch (e) {} }
     throw new Error("No servers");
   }, res));
-
-  // 4. KAI (Backup)
-  fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().search(req.params.query), res));
-  fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchAnimeInfo(req.params.id), res));
-  fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchEpisodeSources(req.params.episodeId), res));
 
   // PROXY
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
