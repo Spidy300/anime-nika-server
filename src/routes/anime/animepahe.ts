@@ -9,12 +9,14 @@ const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev";
 async function fetchShield(targetUrl: string, referer?: string) {
     let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
     if (referer) fullUrl += `&referer=${encodeURIComponent(referer)}`;
+    
+    // console.log(chalk.gray(`Shielding: ${targetUrl}`));
     const res = await fetch(fullUrl);
     if (!res.ok) throw new Error(`Shield Status: ${res.status}`);
     return await res.text();
 }
 
-// --- 1. GOGO SCRAPER (Mobile Mode) ---
+// --- 1. GOGO SCRAPER ---
 class CustomGogo {
     mirrors = ["https://gogoanimes.fi", "https://anitaku.pe", "https://gogoanime3.co"];
 
@@ -44,7 +46,7 @@ class CustomGogo {
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id on ${domain}!`));
-                    // Use the domain itself as the AJAX base
+                    // Try gogo-load first
                     const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
                     const epHtml = await fetchShield(ajaxUrl, domain);
                     const $ep = cheerio.load(epHtml);
@@ -74,30 +76,35 @@ class CustomGogo {
     }
 }
 
-// --- 2. PAHE SCRAPER (The MVP) ---
+// --- 2. PAHE SCRAPER (Now Shielded!) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
-    headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
-
+    
     async search(query: string) {
         try {
-            let res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
-            let data: any = await res.json();
+            // 🟢 Use fetchShield instead of direct fetch
+            let jsonString = await fetchShield(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`);
+            let data = JSON.parse(jsonString);
+
+            // Fallback Search
             if (!data.data || data.data.length === 0) {
                 const firstWord = query.split(" ")[0];
                 if (firstWord && firstWord !== query) {
-                    res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(firstWord)}`, { headers: this.headers });
-                    data = await res.json();
+                    jsonString = await fetchShield(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(firstWord)}`);
+                    data = JSON.parse(jsonString);
                 }
             }
             return { results: (data.data || []).map((i:any) => ({ id: i.session, title: i.title, image: i.poster })) };
-        } catch (e) { return { results: [] }; }
+        } catch (e) { 
+            console.log(chalk.red("Pahe Search Failed: " + e));
+            return { results: [] }; 
+        }
     }
 
     async fetchAnimeInfo(id: string) {
         try {
-            const res = await fetch(`${this.baseUrl}/api?m=release&id=${id}&sort=episode_asc&page=1`, { headers: this.headers });
-            const data: any = await res.json();
+            const jsonString = await fetchShield(`${this.baseUrl}/api?m=release&id=${id}&sort=episode_asc&page=1`);
+            const data = JSON.parse(jsonString);
             const episodes = (data.data || []).map((ep:any) => ({ id: `${id}*${ep.session}`, number: ep.episode }));
             return { id, title: "AnimePahe", episodes };
         } catch (e) { throw new Error("Pahe Info Error"); }
@@ -106,8 +113,9 @@ class CustomPahe {
     async fetchEpisodeSources(episodeId: string) {
         try {
             const [animeId, epId] = episodeId.split("*");
-            const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
-            const html = await res.text();
+            // Shield the play page to find Kwik
+            const html = await fetchShield(`${this.baseUrl}/play/${animeId}/${epId}`);
+            
             const kwikMatch = html.match(/https:\/\/kwik\.cx\/e\/[a-zA-Z0-9]+/);
             if(!kwikMatch) throw new Error("Kwik link missing");
             return { sources: [{ url: kwikMatch[0], quality: '720p', isM3U8: false }] };
@@ -131,7 +139,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // Only Pahe and Gogo. Hianime is removed.
+  // Only Pahe and Gogo routes
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
