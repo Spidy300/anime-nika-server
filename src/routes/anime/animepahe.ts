@@ -3,104 +3,85 @@ import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// --- 1. CUSTOM GOGO SCRAPER (Shotgun Mode) ---
-class CustomGogo {
-    mirrors = [
-        "https://anitaku.so",
-        "https://gogoanime3.co",
-        "https://gogoanimes.fi",
-        "https://gogoanime.hu",
-        "https://anitaku.pe",
-        "https://gogoanime.cl"
-    ];
-
-    async fetch(url: string) {
-        for (const domain of this.mirrors) {
-            try {
-                const target = url.startsWith("http") ? url : `${domain}${url}`;
-                // console.log(chalk.gray(`   ...try ${target}`));
-                const res = await fetch(target, {
-                    headers: { 
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Referer': domain
-                    }
-                });
-                if (res.ok) {
-                    const text = await res.text();
-                    if (!text.includes("Just a moment") && !text.includes("Verify you are human") && text.includes("<!DOCTYPE html>")) {
-                        return { text, domain };
-                    }
-                }
-            } catch (e) {}
+// --- PROXY HELPER ---
+async function fetchWithProxy(url: string, referer: string) {
+    try {
+        // 1. Try Direct
+        let res = await fetch(url, { 
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36', 
+                'Referer': referer 
+            } 
+        });
+        if(res.ok) {
+            const text = await res.text();
+            if(!text.includes("Just a moment") && !text.includes("Verify you are human")) return text;
         }
-        return null;
-    }
+        
+        // 2. Fallback: Google Translate Proxy (Bypass Cloudflare)
+        console.log(chalk.yellow("   -> Direct failed. Engaging Google Proxy..."));
+        const proxyUrl = `https://translate.google.com/translate?sl=auto&tl=en&u=${encodeURIComponent(url)}`;
+        res = await fetch(proxyUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        return await res.text();
+    } catch(e) { return ""; }
+}
+
+// --- CUSTOM GOGO ---
+class CustomGogo {
+    baseUrl = "https://gogoanime3.co";
 
     async search(query: string) {
-        // 1. Try Real Search
-        const data = await this.fetch(`/search.html?keyword=${encodeURIComponent(query)}`);
-        if (data) {
-            const $ = cheerio.load(data.text);
-            const results: any[] = [];
-            $('.last_episodes .items li').each((i, el) => {
-                const title = $(el).find('.name a').text().trim();
-                const id = $(el).find('.name a').attr('href')?.replace('/category/', '').trim();
-                const image = $(el).find('.img a img').attr('src');
-                if (id && title) results.push({ id, title, image });
-            });
-            if (results.length > 0) return { results };
-        }
-
-        // 2. Force Guess (Backup)
+        // Blind Trust: Always return a result
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        console.log(chalk.yellow(`   -> Gogo: Force returning guess: ${guessId}`));
         return { 
-            results: [{ id: guessId, title: query, image: "", releaseDate: "Force Match" }] 
+            results: [{ 
+                id: guessId, 
+                title: query, 
+                image: "https://gogocdn.net/cover/naruto-shippuden.png", 
+                releaseDate: "Force Match" 
+            }] 
         };
     }
 
     async fetchAnimeInfo(id: string) {
-        const data = await this.fetch(`/category/${id}`);
-        if (!data) throw new Error("Gogo Info Blocked");
+        const text = await fetchWithProxy(`${this.baseUrl}/category/${id}`, this.baseUrl);
         
-        const { text } = data;
-        const $ = cheerio.load(text);
-        const title = $('.anime_info_body_bg h1').text().trim();
-        const movie_id = $('#movie_id').attr('value');
-        const alias = $('#alias_anime').attr('value');
-        const ep_end = $('#episode_page a').last().attr('ep_end');
+        const idMatch = text.match(/value="([^"]+)"\s*id="movie_id"/);
+        const aliasMatch = text.match(/value="([^"]+)"\s*id="alias_anime"/);
+        const epMatch = text.match(/ep_end\s*=\s*['"](\d+)['"]/);
 
-        if(!movie_id) throw new Error("Gogo Info Parse Failed (ID missing)");
+        if (!idMatch) throw new Error("Gogo Blocked (Proxy Failed)");
 
-        // Fetch Episodes
+        const movie_id = idMatch[1];
+        const alias = aliasMatch ? aliasMatch[1] : id;
+        const ep_end = epMatch ? epMatch[1] : "1000";
+
+        // Fetch Episodes from AJAX
         const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-        const epData = await this.fetch(ajaxUrl);
-        if(!epData) throw new Error("Gogo Episode List Blocked");
-
-        const $ep = cheerio.load(epData.text);
+        const epRes = await fetch(ajaxUrl);
+        const epHtml = await epRes.text();
+        
+        const $ = cheerio.load(epHtml);
         const episodes: any[] = [];
-        $ep('li').each((i, el) => {
-            const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
-            const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
+        $('li').each((i, el) => {
+            const epId = $(el).find('a').attr('href')?.trim().replace('/', '');
+            const epNum = $(el).find('.name').text().replace('EP ', '').trim();
             if (epId) episodes.push({ id: epId, number: Number(epNum) });
         });
 
-        return { id, title, episodes: episodes.reverse() };
+        return { id, title: id, episodes: episodes.reverse() };
     }
 
     async fetchEpisodeSources(episodeId: string) {
-        const data = await this.fetch(`/${episodeId}`);
-        if(!data) throw new Error("Gogo Watch Page Blocked");
-        
-        const $ = cheerio.load(data.text);
+        const text = await fetchWithProxy(`${this.baseUrl}/${episodeId}`, this.baseUrl);
+        const $ = cheerio.load(text);
         const iframe = $('iframe').first().attr('src');
-        if (!iframe) throw new Error("No video iframe found");
-        
+        if (!iframe) throw new Error("Gogo Video Blocked");
         return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
     }
 }
 
-// --- 2. CUSTOM PAHE SCRAPER (Manual - Fixes 'null' error) ---
+// --- CUSTOM PAHE ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
     headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
@@ -124,9 +105,8 @@ class CustomPahe {
 
     async fetchEpisodeSources(episodeId: string) {
         try {
-            // Use '*' separator to avoid conflicts
-            if(!episodeId.includes("*") && !episodeId.includes("~")) throw new Error("Invalid ID");
-            const [animeId, epId] = episodeId.replace("~", "*").split("*");
+            if(!episodeId.includes("*")) throw new Error("Invalid ID format");
+            const [animeId, epId] = episodeId.split("*");
             
             const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
             const html = await res.text();
@@ -155,22 +135,20 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // 1. ALLANIME (New Backup)
-  fastify.get('/allanime/search/:query', (req: any, res) => safeRun('AllAnime', () => new ANIME.Zoro().search(req.params.query), res));
-  fastify.get('/allanime/info/:id', (req: any, res) => safeRun('AllAnime', () => new ANIME.Zoro().fetchAnimeInfo(req.params.id), res));
-  fastify.get('/allanime/watch/:episodeId', (req: any, res) => safeRun('AllAnime', () => new ANIME.Zoro().fetchEpisodeSources(req.params.episodeId), res));
-
-  // 2. GOGO (Custom)
+  // 1. GOGO
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // 3. PAHE (Custom - FIXED)
+  // 2. PAHE
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', () => customPahe.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', () => customPahe.fetchAnimeInfo(req.params.id), res));
-  fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => customPahe.fetchEpisodeSources(req.params.episodeId), res));
+  fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => {
+      let id = req.params.episodeId.includes("~") ? req.params.episodeId.replace(/~/g,"*") : req.params.episodeId;
+      return customPahe.fetchEpisodeSources(id);
+  }, res));
 
-  // 4. HIANIME (Backup)
+  // 3. HIANIME (Standard)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', async () => {
@@ -180,7 +158,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     throw new Error("No servers");
   }, res));
 
-  // 5. KAI (Backup)
+  // 4. KAI (Backup)
   fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().search(req.params.query), res));
   fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchAnimeInfo(req.params.id), res));
   fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchEpisodeSources(req.params.episodeId), res));
