@@ -88,8 +88,8 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 STRATEGY 1: CONSTRUCT DIRECT DOWNLOAD URL (No guessing)
-        // We force the scraper to go to the known download server
+        // 🟢 LAYER 1: DIRECT DOWNLOAD WITH REFERER (The Fix)
+        // We act like a real browser coming from the episode page
         const downloadMirrors = [
             `https://gogohd.net/download?id=${episodeId}`,
             `https://goload.io/download?id=${episodeId}`,
@@ -98,47 +98,44 @@ class CustomGogo {
 
         for (const url of downloadMirrors) {
             try {
-                console.log(chalk.gray(`      Trying direct download page: ${url}`));
-                const html = await fetchShield(url);
+                // IMPORTANT: Send the episode page as the Referer
+                const referer = `https://gogoanimes.fi/${episodeId}`; 
+                console.log(chalk.gray(`      Trying download page: ${url}`));
+                
+                const html = await fetchShield(url, referer);
                 const $ = cheerio.load(html);
                 
                 let bestUrl = "";
-                
-                // Scan for MP4 links
                 $('.mirror_link .dowload a, .dowload a').each((i, el) => {
                     const href = $(el).attr('href');
                     const text = $(el).text().toUpperCase();
-                    
                     if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
-                        // Prioritize 1080p > 720p > 480p
                         if (!bestUrl || text.includes("1080")) bestUrl = href;
-                        else if (text.includes("720") && !bestUrl.includes("1080")) bestUrl = href;
                     }
                 });
 
                 if (bestUrl) {
-                    console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
+                    console.log(chalk.green(`      🎉 LOCAL SUCCESS: ${bestUrl}`));
                     return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
                 }
             } catch (e) {}
         }
 
-        // 🟢 STRATEGY 2: FAIL-SAFE PUBLIC API (Backup)
-        // If our scraping fails, ask a public API that works
+        // 🟢 LAYER 2: NEW BACKUP API (AMVSTR)
+        // If local fails, use this reliable public API
         try {
-            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling Public Backup API...`));
-            const backupUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
-            const res = await fetch(backupUrl);
-            const data = await res.json();
+            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Trying Amvstr API...`));
+            const amvstrUrl = `https://api.amvstr.me/api/v2/stream/${episodeId}`;
+            const res = await fetch(amvstrUrl);
+            const data = await res.json() as any; // Type assertion to bypass TS check
             
-            if (data.sources && data.sources.length > 0) {
-                // Find the best quality source
-                const bestSource = data.sources.find((s: any) => s.quality === "1080p") || data.sources[0];
-                console.log(chalk.green(`      🎉 PUBLIC API SUCCESS: ${bestSource.url}`));
-                return { sources: [{ url: bestSource.url, quality: 'default', isM3U8: bestSource.isM3U8 }] };
+            if (data && data.stream && data.stream.multi && data.stream.multi.main && data.stream.multi.main.url) {
+                const streamUrl = data.stream.multi.main.url;
+                console.log(chalk.green(`      🎉 AMVSTR SUCCESS: ${streamUrl}`));
+                return { sources: [{ url: streamUrl, quality: 'default', isM3U8: streamUrl.includes('m3u8') }] };
             }
         } catch (e) {
-            console.log(chalk.red(`      ⚠️ Backup API failed: ${e}`));
+            console.log(chalk.red(`      ⚠️ Amvstr failed: ${e}`));
         }
 
         throw new Error("Gogo Watch Failed - All strategies exhausted");
@@ -164,6 +161,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
+  // Catch-all
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
