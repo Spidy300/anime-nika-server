@@ -94,37 +94,35 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 1. ROBUST DOWNLOAD FINDER
-                // Instead of classes, look for the WORD "Download" in any link
+                // 🟢 STRATEGY 1: STRICT DOWNLOAD FINDER
+                // Only follow links that look like REAL download pages (gogohd, goload, etc)
                 let downloadLink = "";
                 $('a').each((i, el) => {
+                    const href = $(el).attr('href');
                     const text = $(el).text().trim().toUpperCase();
-                    if (text.includes("DOWNLOAD")) {
-                        const href = $(el).attr('href');
-                        if (href && href.startsWith('http')) {
+                    
+                    if (href && text.includes("DOWNLOAD")) {
+                        // Check for known valid domains to avoid junk like 9animeto
+                        if (href.includes('gogohd') || href.includes('goload') || href.includes('embtaku') || href.includes('download')) {
                             downloadLink = href;
-                            return false; // Stop searching
+                            return false; // Stop searching, we found a good one
                         }
                     }
                 });
                 
                 if (downloadLink) {
-                    console.log(chalk.green(`      Found Download Page: ${downloadLink}`));
+                    if (!downloadLink.startsWith('http')) downloadLink = downloadLink.startsWith('//') ? 'https:' + downloadLink : domain + downloadLink;
+                    console.log(chalk.green(`      Found Valid Download Page: ${downloadLink}`));
                     
                     try {
                         const dlHtml = await fetchShield(downloadLink, domain);
                         const $dl = cheerio.load(dlHtml);
-                        
                         let bestUrl = "";
                         
-                        // Scan the download page for MP4s
                         $dl('a').each((i, el) => {
                              const href = $dl(el).attr('href');
                              const text = $dl(el).text().toUpperCase();
-                             
-                             // We want reliable storage servers like "gofile", "mp4upload", or direct links
-                             if (href && (text.includes('1080') || text.includes('720') || text.includes('360') || text.includes('DOWNLOAD'))) {
-                                 // Prioritize 1080p
+                             if (href && (href.endsWith('.mp4') || text.includes('DOWNLOAD') || text.includes('HDP'))) {
                                  if (!bestUrl || text.includes('1080')) {
                                      bestUrl = href;
                                  }
@@ -133,28 +131,33 @@ class CustomGogo {
 
                         if (bestUrl) {
                              console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
-                             // Return as direct file (isM3U8: false)
                              return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
                         }
-                    } catch (e) {
-                         console.log(chalk.yellow(`      ⚠️ Download Page Scan Failed: ${e}`));
-                    }
+                    } catch (e) {}
                 }
 
-                // 🟢 2. BACKUP: Regex Scan on Iframe (If download fails)
-                console.log(chalk.gray("      Falling back to Iframe Scan..."));
-                let iframe = $('iframe').first().attr('src');
+                // 🟢 STRATEGY 2: IFRAME SCAN (VIDCDN)
+                console.log(chalk.gray("      Falling back to Vidcdn Scan..."));
+                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video');
+                if (!iframe) iframe = $('iframe').first().attr('src');
                 
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
                     
                     const playerHtml = await fetchShield(iframe, domain);
+                    
+                    // Regex for m3u8
                     const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
-
                     if (m3u8Match && m3u8Match[1]) {
                         console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
                         return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                     }
+                }
+
+                // 🟢 STRATEGY 3: BACKUP LINK RETURN
+                // If we absolutely fail, return the download link itself (better than nothing)
+                if (downloadLink) {
+                     return { sources: [{ url: downloadLink, quality: 'backup', isM3U8: false }] };
                 }
 
             } catch(e) {}
