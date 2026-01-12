@@ -6,9 +6,8 @@ const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev";
 
 async function fetchShield(targetUrl: string, referer?: string) {
     let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
-    // Mobile User-Agent to request simpler, unencrypted players
     fullUrl += `&headers=${encodeURIComponent(JSON.stringify({
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
         'Referer': referer || 'https://gogoanimes.fi/'
     }))}`;
     
@@ -99,60 +98,69 @@ class CustomGogo {
 
                 const $ = cheerio.load(html);
 
-                // 🟢 1. EXTRACT REAL ID (Fixing the garbage ID bug)
-                let iframeSrc = $('.anime_muti_link ul li.vidcdn a').attr('data-video') || $('iframe').first().attr('src') || "";
-                
-                // Regex to grab only the Base64 ID (alphanumeric + =)
-                // Stops at & or ? to avoid grabbing junk like "?ep=8308"
-                const idMatch = iframeSrc.match(/[?&]id=([a-zA-Z0-9+=]+)/);
-                
-                if (idMatch && idMatch[1]) {
-                    const cleanId = idMatch[1];
-                    console.log(chalk.green(`      Found Clean ID: ${cleanId}`));
+                // 🟢 STRATEGY: MULTI-SERVER SWEEP
+                // Collect ALL available servers for this episode
+                const players: { name: string, url: string }[] = [];
 
-                    // 🟢 2. CONSTRUCT VIDSTREAMING URL
-                    const playerUrl = `https://embtaku.pro/streaming.php?id=${cleanId}`;
-                    const playerHtml = await fetchShield(playerUrl, domain);
+                // 1. Vidstreaming (Default)
+                const vidcdn = $('li.vidcdn a').attr('data-video');
+                if (vidcdn) players.push({ name: 'Vidstreaming', url: vidcdn });
 
-                    // 🟢 3. STRICT M3U8 SEARCH
-                    // Only accept strings ending in .m3u8
-                    const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
+                // 2. StreamSB (Very Reliable Backup)
+                const streamsb = $('li.streamsb a').attr('data-video');
+                if (streamsb) players.push({ name: 'StreamSB', url: streamsb });
+
+                // 3. Xstream (Backup)
+                const xstream = $('li.xstreamcdn a').attr('data-video');
+                if (xstream) players.push({ name: 'Xstream', url: xstream });
+
+                // 4. Default Iframe (Fallback)
+                const defaultFrame = $('iframe').first().attr('src');
+                if (defaultFrame) players.push({ name: 'Default', url: defaultFrame });
+
+                // 🟢 EXECUTE SWEEP
+                for (let player of players) {
+                    let url = player.url;
+                    if (url.startsWith('//')) url = 'https:' + url;
                     
-                    if (m3u8Match && m3u8Match[1]) {
-                        console.log(chalk.green(`      🎉 FOUND VALID M3U8: ${m3u8Match[1]}`));
-                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
-                    }
-                    
-                    // 🟢 4. STRICT MP4 SEARCH (Legacy Fallback)
-                    const mp4Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.mp4)['"]/);
-                    if (mp4Match && mp4Match[1]) {
-                         console.log(chalk.green(`      🎉 FOUND VALID MP4: ${mp4Match[1]}`));
-                         return { sources: [{ url: mp4Match[1], quality: 'default', isM3U8: false }] };
-                    }
-                } else {
-                    console.log(chalk.yellow("      ⚠️ Could not extract clean ID from iframe."));
-                }
+                    console.log(chalk.gray(`      Scanning Server: [${player.name}] ${url}`));
 
-                // 🟢 5. NEW BACKUP: VIDSTACK API
-                // If local scraping fails, try this dedicated Gogo scraper API
-                try {
-                    console.log(chalk.gray("      Trying Vidstack API..."));
-                    const vidstackUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
-                    const res = await fetch(vidstackUrl);
-                    if (res.ok) {
-                        const data = await res.json();
-                        // Validate the result!
-                        if (data.sources && data.sources[0] && data.sources[0].url.endsWith('.m3u8')) {
-                             console.log(chalk.green(`      🎉 VIDSTACK SUCCESS: ${data.sources[0].url}`));
-                             return { sources: [{ url: data.sources[0].url, quality: 'default', isM3U8: true }] };
+                    try {
+                        const playerHtml = await fetchShield(url, domain);
+
+                        // 🔍 Check 1: M3U8 (Standard)
+                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
+                        if (m3u8Match && m3u8Match[1]) {
+                            console.log(chalk.green(`      🎉 FOUND VIDEO on ${player.name}: ${m3u8Match[1]}`));
+                            return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
                         }
+
+                        // 🔍 Check 2: MP4 (StreamSB/Legacy)
+                        const mp4Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.mp4)['"]/);
+                        if (mp4Match && mp4Match[1]) {
+                             console.log(chalk.green(`      🎉 FOUND MP4 on ${player.name}: ${mp4Match[1]}`));
+                             return { sources: [{ url: mp4Match[1], quality: 'default', isM3U8: false }] };
+                        }
+
+                        // 🔍 Check 3: JWPlayer Config
+                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
+                        if (jwMatch && jwMatch[1]) {
+                             const fileMatch = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
+                             if (fileMatch && fileMatch[1]) {
+                                 console.log(chalk.green(`      🎉 FOUND JWPLAYER on ${player.name}: ${fileMatch[1]}`));
+                                 return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: fileMatch[1].includes('.m3u8') }] };
+                             }
+                        }
+
+                    } catch (err) {
+                        // console.log(`      ⚠️ ${player.name} failed, trying next...`);
                     }
-                } catch(e) {}
+                }
 
             } catch(e) {}
         }
         
-        throw new Error("Gogo Watch Failed - No playable video file found");
+        throw new Error("Gogo Watch Failed - All servers exhausted");
     }
 }
 
@@ -184,11 +192,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        
-        // 🟢 FIX: Do not proxy HTML pages as video
-        if (url.includes('.php') || url.includes('.html')) {
-             return reply.status(400).send("Proxy refused: Not a video file");
-        }
+        if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video URL");
 
         const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
         const response = await fetch(fullUrl);
