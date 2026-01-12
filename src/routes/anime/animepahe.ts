@@ -37,13 +37,12 @@ class CustomGogo {
         
         for (const domain of this.mirrors) {
             const html = await fetchShield(`${domain}/category/${id}`);
+            
             if (!html || html.includes("WAF") || html.includes("Verify")) continue;
 
             const $ = cheerio.load(html);
             const movie_id = $('#movie_id').attr('value');
             const alias = $('#alias_anime').attr('value');
-            
-            // 🟢 Default to 2000 to scan all episodes (Fixes 'undefined' bug)
             let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
             if (movie_id) {
@@ -101,37 +100,31 @@ class CustomGogo {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
                     console.log(chalk.green(`      Found Iframe: ${iframe}`));
 
-                    // 🟢 SMART JSON EXTRACTOR
                     try {
-                        console.log(chalk.gray(`      ⛏️  Scanning JSON sources in iframe...`));
+                        console.log(chalk.gray(`      ⛏️  Scanning iframe content...`));
                         const playerHtml = await fetchShield(iframe, domain);
                         
-                        // 1. Look for: sources: [{"file":"https://...m3u8"}]
-                        const sourcesMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
-                        
-                        if (sourcesMatch && sourcesMatch[1]) {
-                            // Try to parse the JSON manually or via Regex
-                            const fileMatch = sourcesMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
-                            if (fileMatch && fileMatch[1]) {
-                                console.log(chalk.green(`      🎉 JSON EXTRACT: ${fileMatch[1]}`));
-                                return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: fileMatch[1].includes('m3u8') }] };
+                        // 🟢 DEBUG: Check if we are blocked
+                        if (playerHtml.length < 500) console.log(chalk.yellow(`      ⚠️ Short response (${playerHtml.length} chars). Might be blocked.`));
+
+                        // 🟢 NUCLEAR REGEX LIST (Tries all common patterns)
+                        const patterns = [
+                            /file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/,  // file: "url"
+                            /source:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/, // source: "url"
+                            /['"]file['"]:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/, // "file": "url"
+                            /(https?:\/\/[a-zA-Z0-9\-_.:?=&]+\.m3u8)/            // Raw URL
+                        ];
+
+                        for (const regex of patterns) {
+                            const match = playerHtml.match(regex);
+                            if (match && match[1]) {
+                                const m3u8Url = match[1];
+                                console.log(chalk.green(`      🎉 EXTRACTED VIDEO: ${m3u8Url}`));
+                                return { sources: [{ url: m3u8Url, quality: 'default', isM3U8: true }] };
                             }
                         }
-
-                        // 2. Backup: Look for ANY http link inside "file": "..."
-                        const fileRegex = /["']file["']:\s*["'](https?:\/\/[^"']+)["']/;
-                        const fallbackMatch = playerHtml.match(fileRegex);
-                        if (fallbackMatch && fallbackMatch[1]) {
-                             console.log(chalk.green(`      🎉 REGEX EXTRACT: ${fallbackMatch[1]}`));
-                             return { sources: [{ url: fallbackMatch[1], quality: 'default', isM3U8: fallbackMatch[1].includes('m3u8') }] };
-                        }
-
-                        // 3. Last Resort: Simple M3U8 scan
-                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
-                        if (m3u8Match && m3u8Match[1]) {
-                             console.log(chalk.green(`      🎉 SIMPLE EXTRACT: ${m3u8Match[1]}`));
-                             return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
-                        }
+                        
+                        console.log(chalk.yellow(`      ⚠️ No patterns matched. Dumping snippet: ${playerHtml.substring(0, 100)}...`));
 
                     } catch(err) {
                         console.log(chalk.red(`      ⚠️ Extraction error: ${err}`));
