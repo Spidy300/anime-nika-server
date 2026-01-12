@@ -37,7 +37,6 @@ class CustomGogo {
         
         for (const domain of this.mirrors) {
             const html = await fetchShield(`${domain}/category/${id}`);
-            
             if (!html || html.includes("WAF") || html.includes("Verify")) continue;
 
             const $ = cheerio.load(html);
@@ -48,7 +47,7 @@ class CustomGogo {
             if (movie_id) {
                 console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
                 
-                // Strategy: Use the same domain for AJAX to avoid Cross-Origin blocks
+                // Use Same-Domain AJAX to avoid CORS/Cloudflare blocks
                 const ajaxStrategies = [
                     `${domain}/ajax/load-list-episode`, 
                     "https://ajax.gogo-load.com/ajax/load-list-episode",
@@ -68,12 +67,10 @@ class CustomGogo {
                         $ep('li').each((i, el) => {
                             let epId = $ep(el).find('a').attr('href')?.trim() || "";
                             epId = epId.replace(/^\//, '');
-                            // Auto-Repair Broken IDs
                             if (epId.startsWith('-') || (id && !epId.includes(id))) {
                                 const suffix = epId.replace(/^-+/, ''); 
                                 epId = `${id}-${suffix}`;
                             }
-
                             const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                             if (epId) episodes.push({ id: epId, number: Number(epNum) });
                         });
@@ -97,34 +94,34 @@ class CustomGogo {
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
+                
+                // 1. Try to find the streaming server link
                 let iframe = $('.play-video iframe').attr('src') || $('#load_anime iframe').attr('src') || $('iframe').first().attr('src');
                 
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
                     console.log(chalk.green(`      Found Iframe: ${iframe}`));
 
-                    // 🟢 DEEP EXTRACTION LOGIC
-                    // We try to fetch the Iframe content to find the REAL .m3u8 file
+                    // 2. DIG DEEP: Fetch iframe and scan for ANY .m3u8 link
                     try {
-                        console.log(chalk.gray(`      ⛏️  Digging for M3U8 inside iframe...`));
-                        const playerHtml = await fetchShield(iframe, domain); // Use domain as referer
+                        console.log(chalk.gray(`      ⛏️  Deep Scanning iframe for M3U8...`));
+                        const playerHtml = await fetchShield(iframe, domain);
                         
-                        // Regex to find "file: '...m3u8'" or similar common patterns
-                        const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/.*\.m3u8)['"]/) || 
-                                          playerHtml.match(/source\s*:\s*['"](https?:\/\/.*\.m3u8)['"]/);
+                        // 🟢 AGGRESSIVE REGEX: Finds any http link ending in .m3u8
+                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
 
                         if (m3u8Match && m3u8Match[1]) {
                              const m3u8Url = m3u8Match[1];
                              console.log(chalk.green(`      🎉 EXTRACTED DIRECT VIDEO: ${m3u8Url}`));
                              return { sources: [{ url: m3u8Url, quality: 'default', isM3U8: true }] };
                         } else {
-                            console.log(chalk.yellow(`      ⚠️ No M3U8 found in iframe code. Returning iframe as fallback.`));
+                            console.log(chalk.yellow(`      ⚠️ Deep Scan failed. Returning iframe.`));
                         }
                     } catch(err) {
-                        console.log(chalk.red(`      ⚠️ Extraction failed: ${err}`));
+                        console.log(chalk.red(`      ⚠️ Extraction error: ${err}`));
                     }
 
-                    // Fallback: Return the Iframe (Frontend must handle it)
+                    // Fallback
                     return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
                 }
             } catch(e) {}
@@ -148,7 +145,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // Force Gogo logic
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
