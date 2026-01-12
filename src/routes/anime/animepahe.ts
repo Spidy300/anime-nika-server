@@ -87,57 +87,89 @@ class CustomGogo {
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-
-        // 🟢 LAYER 1: DIRECT DOWNLOAD WITH REFERER (The Fix)
-        // We act like a real browser coming from the episode page
-        const downloadMirrors = [
-            `https://gogohd.net/download?id=${episodeId}`,
-            `https://goload.io/download?id=${episodeId}`,
-            `https://anitaku.so/download?id=${episodeId}`
-        ];
-
-        for (const url of downloadMirrors) {
+        for (const domain of this.mirrors) {
             try {
-                // IMPORTANT: Send the episode page as the Referer
-                const referer = `https://gogoanimes.fi/${episodeId}`; 
-                console.log(chalk.gray(`      Trying download page: ${url}`));
-                
-                const html = await fetchShield(url, referer);
+                const html = await fetchShield(`${domain}/${episodeId}`);
+                if (!html) continue;
+
                 const $ = cheerio.load(html);
+
+                // 🟢 STEP 1: FIND THE REAL PLAYER URL
+                // We grab the iframe src directly from the episode page.
+                let playerUrl = $('.anime_muti_link ul li.vidcdn a').attr('data-video');
+                if (!playerUrl) playerUrl = $('iframe').first().attr('src');
+
+                if (!playerUrl) {
+                    console.log(chalk.yellow("      ⚠️ No player found on episode page."));
+                    continue;
+                }
+
+                if (playerUrl.startsWith('//')) playerUrl = 'https:' + playerUrl;
+                console.log(chalk.green(`      Found Player: ${playerUrl}`));
+
+                // 🟢 STEP 2: CRAWL THE PLAYER FOR "DOWNLOAD" LINK
+                // We visit the player URL and look for the 'Download' icon/link inside it.
+                // This is the most reliable way to find the download page.
+                const playerHtml = await fetchShield(playerUrl, domain);
+                const $player = cheerio.load(playerHtml);
                 
-                let bestUrl = "";
-                $('.mirror_link .dowload a, .dowload a').each((i, el) => {
-                    const href = $(el).attr('href');
-                    const text = $(el).text().toUpperCase();
-                    if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
-                        if (!bestUrl || text.includes("1080")) bestUrl = href;
+                let downloadPage = "";
+                
+                // Look for links containing "download"
+                $player('a').each((i, el) => {
+                    const href = $player(el).attr('href');
+                    if (href && href.includes('download')) {
+                        downloadPage = href;
+                        return false; // Found it
                     }
                 });
 
-                if (bestUrl) {
-                    console.log(chalk.green(`      🎉 LOCAL SUCCESS: ${bestUrl}`));
-                    return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
+                if (!downloadPage) {
+                    // Fallback: Try to guess it from the player URL if scraping fails
+                    if (playerUrl.includes('streaming.php') || playerUrl.includes('embed.php')) {
+                        downloadPage = playerUrl.replace(/(streaming|embed)\.php/, 'download');
+                    }
                 }
-            } catch (e) {}
-        }
 
-        // 🟢 LAYER 2: NEW BACKUP API (AMVSTR)
-        // If local fails, use this reliable public API
-        try {
-            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Trying Amvstr API...`));
-            const amvstrUrl = `https://api.amvstr.me/api/v2/stream/${episodeId}`;
-            const res = await fetch(amvstrUrl);
-            const data = await res.json() as any; // Type assertion to bypass TS check
-            
-            if (data && data.stream && data.stream.multi && data.stream.multi.main && data.stream.multi.main.url) {
-                const streamUrl = data.stream.multi.main.url;
-                console.log(chalk.green(`      🎉 AMVSTR SUCCESS: ${streamUrl}`));
-                return { sources: [{ url: streamUrl, quality: 'default', isM3U8: streamUrl.includes('m3u8') }] };
-            }
-        } catch (e) {
-            console.log(chalk.red(`      ⚠️ Amvstr failed: ${e}`));
-        }
+                if (downloadPage) {
+                    console.log(chalk.green(`      Found Download Page: ${downloadPage}`));
+                    
+                    // 🟢 STEP 3: CRAWL THE DOWNLOAD PAGE FOR MP4
+                    try {
+                        const dlHtml = await fetchShield(downloadPage, playerUrl);
+                        const $dl = cheerio.load(dlHtml);
+                        let bestUrl = "";
+                        
+                        $dl('.mirror_link .dowload a, .dowload a').each((i, el) => {
+                             const href = $dl(el).attr('href');
+                             const text = $dl(el).text().toUpperCase();
+                             
+                             if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
+                                 if (!bestUrl || text.includes("1080")) bestUrl = href;
+                                 else if (text.includes("720") && !bestUrl.includes("1080")) bestUrl = href;
+                             }
+                        });
 
+                        if (bestUrl) {
+                             console.log(chalk.green(`      🎉 EXTRACTED MP4: ${bestUrl}`));
+                             return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
+                        }
+                    } catch (e) {
+                         console.log(chalk.yellow(`      ⚠️ Download Page Scan Failed: ${e}`));
+                    }
+                }
+
+                // 🟢 STEP 4: IFRAME M3U8 FALLBACK
+                console.log(chalk.gray("      Falling back to M3U8 Scan..."));
+                const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
+                if (m3u8Match && m3u8Match[1]) {
+                    console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
+                    return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
+                }
+
+            } catch(e) {}
+        }
+        
         throw new Error("Gogo Watch Failed - All strategies exhausted");
     }
 }
