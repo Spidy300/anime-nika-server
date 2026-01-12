@@ -37,7 +37,6 @@ class CustomGogo {
         
         for (const domain of this.mirrors) {
             const html = await fetchShield(`${domain}/category/${id}`);
-            
             if (!html || html.includes("WAF") || html.includes("Verify")) continue;
 
             const $ = cheerio.load(html);
@@ -94,37 +93,39 @@ class CustomGogo {
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
-                let iframe = $('.play-video iframe').attr('src') || $('#load_anime iframe').attr('src') || $('iframe').first().attr('src');
                 
+                // 🟢 NEW STRATEGY: Find the "Vidstreaming" (vidcdn) server explicitly
+                // This is much more reliable than the default iframe
+                let iframe = $('.anime_muti_link ul li.vidcdn a').attr('data-video');
+                
+                // Fallback to default if vidcdn is missing
+                if (!iframe) iframe = $('iframe').first().attr('src');
+
                 if (iframe) {
                     if (iframe.startsWith('//')) iframe = 'https:' + iframe;
-                    console.log(chalk.green(`      Found Iframe: ${iframe}`));
+                    console.log(chalk.green(`      Targeting Iframe: ${iframe}`));
 
                     try {
-                        console.log(chalk.gray(`      ⛏️  Scanning iframe content...`));
                         const playerHtml = await fetchShield(iframe, domain);
                         
-                        // 🟢 DEBUG: Check if we are blocked
-                        if (playerHtml.length < 500) console.log(chalk.yellow(`      ⚠️ Short response (${playerHtml.length} chars). Might be blocked.`));
-
-                        // 🟢 NUCLEAR REGEX LIST (Tries all common patterns)
-                        const patterns = [
-                            /file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/,  // file: "url"
-                            /source:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/, // source: "url"
-                            /['"]file['"]:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/, // "file": "url"
-                            /(https?:\/\/[a-zA-Z0-9\-_.:?=&]+\.m3u8)/            // Raw URL
-                        ];
-
-                        for (const regex of patterns) {
-                            const match = playerHtml.match(regex);
-                            if (match && match[1]) {
-                                const m3u8Url = match[1];
-                                console.log(chalk.green(`      🎉 EXTRACTED VIDEO: ${m3u8Url}`));
-                                return { sources: [{ url: m3u8Url, quality: 'default', isM3U8: true }] };
+                        // 1. JWPlayer Sources Regex (Most common for Vidstreaming)
+                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
+                        if (jwMatch && jwMatch[1]) {
+                            const fileMatch = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
+                            if (fileMatch && fileMatch[1]) {
+                                console.log(chalk.green(`      🎉 JWPLAYER EXTRACT: ${fileMatch[1]}`));
+                                return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: true }] };
                             }
                         }
+
+                        // 2. Generic M3U8 Regex (Backup)
+                        const m3u8Match = playerHtml.match(/(https?:\/\/[^"']+\.m3u8)/);
+                        if (m3u8Match && m3u8Match[1]) {
+                             console.log(chalk.green(`      🎉 GENERIC EXTRACT: ${m3u8Match[1]}`));
+                             return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
+                        }
                         
-                        console.log(chalk.yellow(`      ⚠️ No patterns matched. Dumping snippet: ${playerHtml.substring(0, 100)}...`));
+                        console.log(chalk.yellow(`      ⚠️ Extraction failed. Snippet: ${playerHtml.substring(0, 100)}`));
 
                     } catch(err) {
                         console.log(chalk.red(`      ⚠️ Extraction error: ${err}`));
@@ -158,7 +159,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Catch-all
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
