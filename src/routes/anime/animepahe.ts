@@ -3,23 +3,25 @@ import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 import { ANIME } from '@consumet/extensions';
 
-// 🟢 YOUR CLOUDFLARE SHIELD URL
+// 🟢 YOUR PROXY URL
 const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev"; 
 
-async function fetchShield(targetUrl: string) {
-    const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
+// 🟢 NEW SHIELD FUNCTION: Accepts a custom Referer
+async function fetchShield(targetUrl: string, referer?: string) {
+    let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
+    if (referer) fullUrl += `&referer=${encodeURIComponent(referer)}`; // Pass the key to the Worker
+    
     const res = await fetch(fullUrl);
     if (!res.ok) throw new Error(`Shield Status: ${res.status}`);
     return await res.text();
 }
 
-// --- 1. GOGO SCRAPER (Auto-Detect AJAX) ---
+// --- 1. GOGO SCRAPER (Fixed Referrer Logic) ---
 class CustomGogo {
     mirrors = [
         "https://gogoanimes.fi", 
         "https://anitaku.pe",
-        "https://gogoanime3.co",
-        "https://gogoanime.hu"
+        "https://gogoanime3.co"
     ];
 
     async search(query: string) {
@@ -39,6 +41,7 @@ class CustomGogo {
         
         for (const domain of this.mirrors) {
             try {
+                // Step 1: Get the Page
                 const html = await fetchShield(`${domain}/category/${id}`);
                 
                 if (html.includes("WAF") || html.includes("Verify you are human")) continue;
@@ -51,30 +54,24 @@ class CustomGogo {
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id on ${domain}!`));
                     
-                    // 🟢 TRY BOTH AJAX SERVERS
-                    const ajaxDomains = ["https://ajax.gogo-load.com", "https://ajax.gogocdn.net"];
-                    let episodes: any[] = [];
-
-                    for (const ajaxBase of ajaxDomains) {
-                        try {
-                            const ajaxUrl = `${ajaxBase}/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                            const epHtml = await fetchShield(ajaxUrl);
-                            const $ep = cheerio.load(epHtml);
-                            
-                            $ep('li').each((i, el) => {
-                                const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
-                                const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
-                                if (epId) episodes.push({ id: epId, number: Number(epNum) });
-                            });
-
-                            if (episodes.length > 0) break; // Found episodes! Stop looking.
-                        } catch (e) {}
-                    }
+                    // 🟢 THE FIX: Pass the domain as the Referrer
+                    const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                    
+                    // We tell the Worker: "Tell Gogo we came from ${domain}"
+                    const epHtml = await fetchShield(ajaxUrl, domain);
+                    
+                    const $ep = cheerio.load(epHtml);
+                    const episodes: any[] = [];
+                    $ep('li').each((i, el) => {
+                        const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
+                        const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
+                        if (epId) episodes.push({ id: epId, number: Number(epNum) });
+                    });
                     
                     if (episodes.length > 0) return { id, title: id, episodes: episodes.reverse() };
                 }
             } catch (e) {
-                console.log(chalk.yellow(`      -> Failed on ${domain}, trying next...`));
+                console.log(chalk.yellow(`      -> Failed on ${domain} (AJAX Blocked?), trying next...`));
             }
         }
         throw new Error("Gogo Info Failed (All mirrors blocked)");
@@ -93,7 +90,7 @@ class CustomGogo {
     }
 }
 
-// --- 2. PAHE SCRAPER (Smart Fallback) ---
+// --- 2. PAHE SCRAPER (Working) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
     headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
@@ -102,11 +99,9 @@ class CustomPahe {
         try {
             let res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
             let data: any = await res.json();
-
             if (!data.data || data.data.length === 0) {
                 const firstWord = query.split(" ")[0];
                 if (firstWord && firstWord !== query) {
-                    console.log(chalk.yellow(`   -> Pahe: 0 results. Trying fallback: ${firstWord}`));
                     res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(firstWord)}`, { headers: this.headers });
                     data = await res.json();
                 }
