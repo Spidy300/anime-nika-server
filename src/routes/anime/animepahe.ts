@@ -3,174 +3,425 @@ import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 import { ANIME } from '@consumet/extensions';
 
-// --- PROXY TUNNEL (The Key to Bypassing IP Bans) ---
-async function fetchTunnel(targetUrl: string) {
-    try {
-        // We use 'allorigins' to mask our IP address from Gogo
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-        const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error("Proxy failed");
-        return await res.text();
-    } catch (e) {
-        console.log(chalk.red(`   -> Proxy Tunnel failed for: ${targetUrl}`));
-        return null;
+// --- RENDER-OPTIMIZED PROXY TUNNEL ---
+async function fetchTunnel(targetUrl: string, retries = 2) {
+    // Render has 30-second request timeout, so we need faster proxies
+    const proxies = [
+        (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        // Direct fetch as last resort (works on Render's servers)
+        (url: string) => url
+    ];
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+        for (const proxyFn of proxies) {
+            try {
+                const proxyUrl = proxyFn(targetUrl);
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s timeout
+                
+                const res = await fetch(proxyUrl, { 
+                    signal: controller.signal,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    }
+                });
+                
+                clearTimeout(timeoutId);
+                
+                if (res.ok) {
+                    const text = await res.text();
+                    if (text && text.length > 100) return text; // Valid response
+                }
+            } catch (e) {
+                continue; // Try next proxy
+            }
+        }
     }
+
+    console.log(chalk.red(`   -> All proxies failed for: ${targetUrl}`));
+    return null;
 }
 
-// --- CUSTOM GOGO (Tunneled) ---
+// --- RENDER-OPTIMIZED GOGO CLASS ---
 class CustomGogo {
-    baseUrl = "https://gogoanime3.co";
+    domains = [
+        "https://anitaku.to",
+        "https://gogoanime3.co", 
+        "https://gogoanime3.net"
+    ];
 
     async search(query: string) {
-        // Force result so you can click it
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        
+        // Try real search with quick timeout for Render
+        for (const domain of this.domains.slice(0, 2)) { // Only try first 2 domains
+            try {
+                const controller = new AbortController();
+                setTimeout(() => controller.abort(), 5000);
+                
+                const html = await fetchTunnel(`${domain}/search.html?keyword=${encodeURIComponent(query)}`);
+                if (!html) continue;
+
+                const $ = cheerio.load(html);
+                const results: any[] = [];
+                
+                $('.items li').each((i, el) => {
+                    if (i >= 15) return false; // Limit results
+                    const $el = $(el);
+                    const title = $el.find('.name a').text().trim();
+                    const id = $el.find('.name a').attr('href')?.replace('/category/', '').trim();
+                    const image = $el.find('img').attr('src');
+                    const releaseDate = $el.find('.released').text().replace('Released:', '').trim();
+                    
+                    if (id && title) {
+                        results.push({ id, title, image, releaseDate });
+                    }
+                });
+
+                if (results.length > 0) return { results };
+            } catch (e) {
+                continue;
+            }
+        }
+
+        // Quick fallback
         return { 
             results: [{ 
                 id: guessId, 
                 title: query, 
-                image: "https://gogocdn.net/cover/naruto-shippuden.png", 
-                releaseDate: "Force Match" 
+                image: "https://gogocdn.net/cover/default.png", 
+                releaseDate: "Search Result" 
             }] 
         };
     }
 
     async fetchAnimeInfo(id: string) {
-        // 🟢 TUNNEL THE INFO REQUEST
-        const html = await fetchTunnel(`${this.baseUrl}/category/${id}`);
-        if (!html) throw new Error("Gogo Info Blocked (Tunnel Failed)");
+        // Try only 2 domains to stay under Render timeout
+        for (const domain of this.domains.slice(0, 2)) {
+            try {
+                const html = await fetchTunnel(`${domain}/category/${id}`);
+                if (!html) continue;
 
-        const $ = cheerio.load(html);
-        const title = $('.anime_info_body_bg h1').text().trim();
-        const movie_id = $('#movie_id').attr('value');
-        const alias = $('#alias_anime').attr('value');
-        const ep_end = $('#episode_page a').last().attr('ep_end');
+                const $ = cheerio.load(html);
+                const title = $('.anime_info_body_bg h1').text().trim();
+                const movie_id = $('#movie_id').attr('value');
+                const alias = $('#alias_anime').attr('value');
+                const ep_end = $('#episode_page a').last().attr('ep_end') || '500';
 
-        if (!movie_id) throw new Error("Gogo Info Parse Failed");
+                if (!movie_id) continue;
 
-        // 🟢 TUNNEL THE EPISODE LIST REQUEST
-        const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-        const epHtml = await fetchTunnel(ajaxUrl);
-        if (!epHtml) throw new Error("Gogo Episode List Blocked");
+                // Quick episode fetch
+                const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                const epHtml = await fetchTunnel(ajaxUrl);
+                if (!epHtml) continue;
 
-        const $ep = cheerio.load(epHtml);
-        const episodes: any[] = [];
-        $ep('li').each((i, el) => {
-            const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
-            const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
-            if (epId) episodes.push({ id: epId, number: Number(epNum) });
-        });
+                const $ep = cheerio.load(epHtml);
+                const episodes: any[] = [];
+                
+                $ep('li').each((i, el) => {
+                    const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
+                    const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
+                    if (epId) episodes.push({ id: epId, number: Number(epNum) || i + 1 });
+                });
 
-        return { id, title: id, episodes: episodes.reverse() };
+                if (episodes.length > 0) {
+                    return { id, title: title || id, episodes: episodes.reverse() };
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+
+        throw new Error("Gogo: Unable to fetch info (site may be down)");
     }
 
     async fetchEpisodeSources(episodeId: string) {
-        // 🟢 TUNNEL THE WATCH PAGE
-        const html = await fetchTunnel(`${this.baseUrl}/${episodeId}`);
-        if (!html) throw new Error("Gogo Watch Page Blocked");
+        // Try only first domain for speed on Render
+        for (const domain of this.domains.slice(0, 1)) {
+            try {
+                const html = await fetchTunnel(`${domain}/${episodeId}`);
+                if (!html) continue;
 
-        const $ = cheerio.load(html);
-        const iframe = $('iframe').first().attr('src');
-        if (!iframe) throw new Error("No video iframe found");
+                const $ = cheerio.load(html);
+                const sources: any[] = [];
+                
+                // Extract iframe sources
+                $('iframe').each((i, el) => {
+                    const src = $(el).attr('src');
+                    if (src) {
+                        sources.push({ 
+                            url: src.startsWith('//') ? 'https:' + src : src, 
+                            quality: 'default', 
+                            isM3U8: src.includes('.m3u8') 
+                        });
+                    }
+                });
 
-        return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
+                if (sources.length > 0) {
+                    return { sources };
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+
+        throw new Error("No video sources found");
     }
 }
 
-// --- CUSTOM PAHE (Manual) ---
+// --- RENDER-OPTIMIZED PAHE CLASS ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
-    headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+    headers = { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://animepahe.ru/'
+    };
 
     async search(query: string) {
         try {
-            const res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 6000);
+            
+            const res = await fetch(
+                `${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, 
+                { headers: this.headers, signal: controller.signal }
+            );
             const data: any = await res.json();
-            return { results: (data.data || []).map((i:any) => ({ id: i.session, title: i.title, image: i.poster })) };
-        } catch (e) { return { results: [] }; }
+            return { results: (data.data || []).map((i:any) => ({ 
+                id: i.session, 
+                title: i.title, 
+                image: i.poster 
+            })) };
+        } catch (e) { 
+            return { results: [] }; 
+        }
     }
 
     async fetchAnimeInfo(id: string) {
         try {
-            const res = await fetch(`${this.baseUrl}/api?m=release&id=${id}&sort=episode_asc&page=1`, { headers: this.headers });
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 6000);
+            
+            const res = await fetch(
+                `${this.baseUrl}/api?m=release&id=${id}&sort=episode_asc&page=1`, 
+                { headers: this.headers, signal: controller.signal }
+            );
             const data: any = await res.json();
-            const episodes = (data.data || []).map((ep:any) => ({ id: `${id}*${ep.session}`, number: ep.episode }));
+            const episodes = (data.data || []).map((ep:any) => ({ 
+                id: `${id}*${ep.session}`, 
+                number: ep.episode 
+            }));
             return { id, title: "AnimePahe", episodes };
-        } catch (e) { throw new Error("Pahe Info Error"); }
+        } catch (e) { 
+            throw new Error("Pahe Info Error"); 
+        }
     }
 
     async fetchEpisodeSources(episodeId: string) {
         try {
-            if(!episodeId.includes("*")) throw new Error("Invalid ID format");
+            if (!episodeId.includes("*")) throw new Error("Invalid ID format");
             const [animeId, epId] = episodeId.split("*");
             
-            const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 8000);
+            
+            const res = await fetch(
+                `${this.baseUrl}/play/${animeId}/${epId}`, 
+                { headers: this.headers, signal: controller.signal }
+            );
             const html = await res.text();
             
-            const kwikMatch = html.match(/https:\/\/kwik\.cx\/e\/[a-zA-Z0-9]+/);
-            if(!kwikMatch) throw new Error("Kwik link missing");
+            // Extract Kwik or other streaming links
+            const kwikMatch = html.match(/https?:\/\/kwik\.[a-z]+\/e\/[a-zA-Z0-9]+/);
+            if (!kwikMatch) {
+                // Try alternate patterns
+                const altMatch = html.match(/https?:\/\/[a-z0-9.-]+\/e\/[a-zA-Z0-9]+/);
+                if (altMatch) {
+                    return { sources: [{ url: altMatch[0], quality: '720p', isM3U8: false }] };
+                }
+                throw new Error("No video link found");
+            }
             
             return { sources: [{ url: kwikMatch[0], quality: '720p', isM3U8: false }] };
-        } catch (e: any) { throw new Error("Pahe Watch Error: " + e.message); }
+        } catch (e: any) { 
+            throw new Error("Pahe Watch Error: " + e.message); 
+        }
+    }
+}
+
+// --- RENDER-OPTIMIZED HIANIME ---
+class FixedHianime extends ANIME.Hianime {
+    async fetchEpisodeSources(episodeId: string, server?: any) {
+        // Only try most reliable servers to save time on Render
+        const serverOrder = ["megacloud", "vidstreaming"];
+        
+        for (const srv of serverOrder) {
+            try {
+                const controller = new AbortController();
+                setTimeout(() => controller.abort(), 8000);
+                
+                const result = await super.fetchEpisodeSources(episodeId, srv as any);
+                if (result && result.sources && result.sources.length > 0) {
+                    return result;
+                }
+            } catch (e) {
+                console.log(`   -> Server ${srv} failed`);
+                continue;
+            }
+        }
+        
+        throw new Error("Hianime: No working servers (try Pahe provider)");
     }
 }
 
 const customGogo = new CustomGogo();
 const customPahe = new CustomPahe();
+const fixedHianime = new FixedHianime();
 
 const routes = async (fastify: FastifyInstance, options: any) => {
+  // Render-aware error handler
   const safeRun = async (providerName: string, fn: () => Promise<any>, reply: any) => {
+    const startTime = Date.now();
+    
     try {
         console.log(chalk.blue(`[${providerName}] Running...`));
         const res = await fn();
-        console.log(chalk.green(`   -> Success`));
+        const duration = Date.now() - startTime;
+        console.log(chalk.green(`   -> Success (${duration}ms)`));
         return reply.send(res);
     } catch (e: any) {
-        console.error(chalk.red(`   -> Error:`), e.message);
-        return reply.status(200).send({ error: e.message, results: [] });
+        const duration = Date.now() - startTime;
+        console.error(chalk.red(`   -> Error (${duration}ms):`), e.message);
+        return reply.status(200).send({ 
+            error: e.message, 
+            results: [], 
+            sources: [],
+            suggestion: providerName !== 'Pahe' ? 'Try using Pahe provider' : 'Provider temporarily unavailable'
+        });
     }
   };
 
-  // ROUTES
-  fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
-  fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
-  fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
+  // GOGO ROUTES
+  fastify.get('/gogo/search/:query', (req: any, res) => 
+    safeRun('Gogo', () => customGogo.search(req.params.query), res)
+  );
+  
+  fastify.get('/gogo/info/:id', (req: any, res) => 
+    safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res)
+  );
+  
+  fastify.get('/gogo/watch/:episodeId', (req: any, res) => 
+    safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res)
+  );
 
-  fastify.get('/:query', (req: any, res) => safeRun('Pahe', () => customPahe.search(req.params.query), res));
-  fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', () => customPahe.fetchAnimeInfo(req.params.id), res));
-  fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => {
-      let id = req.params.episodeId.includes("~") ? req.params.episodeId.replace(/~/g,"*") : req.params.episodeId;
+  // PAHE ROUTES (Primary - Most Reliable)
+  fastify.get('/:query', (req: any, res) => 
+    safeRun('Pahe', () => customPahe.search(req.params.query), res)
+  );
+  
+  fastify.get('/info/:id', (req: any, res) => 
+    safeRun('Pahe', () => customPahe.fetchAnimeInfo(req.params.id), res)
+  );
+  
+  fastify.get('/watch/:episodeId', (req: any, res) => 
+    safeRun('Pahe', () => {
+      let id = req.params.episodeId.includes("~") 
+        ? req.params.episodeId.replace(/~/g, "*") 
+        : req.params.episodeId;
       return customPahe.fetchEpisodeSources(id);
-  }, res));
+    }, res)
+  );
 
-  // HIANIME (Keep as backup)
-  fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
-  fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
-  fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', async () => {
-    const p = new ANIME.Hianime();
-    const servers = ["vidcloud", "megacloud", "vidstreaming", "streamtape"];
-    for (const server of servers) { try { return await p.fetchEpisodeSources(req.params.episodeId, server as any); } catch (e) {} }
-    throw new Error("No servers");
-  }, res));
+  // HIANIME ROUTES
+  fastify.get('/hianime/search/:query', (req: any, res) => 
+    safeRun('Hianime', () => fixedHianime.search(req.params.query), res)
+  );
+  
+  fastify.get('/hianime/info/:id', (req: any, res) => 
+    safeRun('Hianime', () => fixedHianime.fetchAnimeInfo(req.params.id), res)
+  );
+  
+  fastify.get('/hianime/watch/:episodeId', (req: any, res) => 
+    safeRun('Hianime', () => fixedHianime.fetchEpisodeSources(req.params.episodeId), res)
+  );
 
-  // KAI
-  fastify.get('/kai/search/:query', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().search(req.params.query), res));
-  fastify.get('/kai/info/:id', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchAnimeInfo(req.params.id), res));
-  fastify.get('/kai/watch/:episodeId', (req: any, res) => safeRun('Kai', () => new ANIME.AnimeKai().fetchEpisodeSources(req.params.episodeId), res));
-
-  // PROXY
+  // IMPROVED PROXY for Render
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
-        if (!url) return reply.status(400).send("Missing URL");
+        if (!url) return reply.status(400).send({ error: "Missing URL parameter" });
         
+        // Determine referer based on URL
         let referer = "https://gogoanime3.co/";
         if (url.includes("kwik")) referer = "https://kwik.cx/";
+        if (url.includes("hianime")) referer = "https://hianime.to/";
+        if (url.includes("anitaku")) referer = "https://anitaku.to/";
 
-        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0" } });
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 12000); // 12s timeout for video files
+
+        const response = await fetch(url, { 
+            headers: { 
+                'Referer': referer, 
+                'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                'Accept': '*/*',
+                'Origin': referer.replace(/\/$/, '')
+            },
+            signal: controller.signal
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Fetch failed: ${response.status}`);
+        }
+
+        // Set CORS headers for Render
         reply.header("Access-Control-Allow-Origin", "*");
+        reply.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+        reply.header("Access-Control-Allow-Headers", "Content-Type, Range");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
+        
+        // Handle range requests for video streaming
+        const range = response.headers.get("content-range");
+        if (range) {
+            reply.header("Content-Range", range);
+            reply.header("Accept-Ranges", "bytes");
+        }
+        
         reply.send(Buffer.from(await response.arrayBuffer()));
-    } catch (e) { reply.status(500).send({ error: "Proxy Error" }); }
+    } catch (e: any) { 
+        console.error("Proxy error:", e.message);
+        reply.status(500).send({ error: "Proxy failed: " + e.message }); 
+    }
+  });
+
+  // Health check for Render monitoring
+  fastify.get('/health', async (req, reply) => {
+    reply.send({ 
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      providers: {
+        pahe: 'primary',
+        gogo: 'secondary',
+        hianime: 'backup'
+      },
+      note: 'Use Pahe provider for best results'
+    });
+  });
+
+  // Root endpoint
+  fastify.get('/', async (req, reply) => {
+    reply.send({
+      message: 'Anime API Server',
+      endpoints: {
+        pahe: '/:query, /info/:id, /watch/:episodeId',
+        gogo: '/gogo/search/:query, /gogo/info/:id, /gogo/watch/:episodeId',
+        hianime: '/hianime/search/:query, /hianime/info/:id, /hianime/watch/:episodeId',
+        proxy: '/proxy?url=VIDEO_URL',
+        health: '/health'
+      }
+    });
   });
 };
 

@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: consumet-api # Name of the service
+    name: anime-nika-server
     env: docker
-    repo: https://github.com/consumet/api.consumet.org.git
+    repo: https://github.com/Spidy300/anime-nika-server.git
     plan: free
     branch: main
     envVars:
       - key: PORT
-        value: 3000
+        value: 10000
+      - key: NODE_ENV
+        value: production
