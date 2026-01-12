@@ -2,11 +2,17 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
+// Keep your worker proxy
 const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev"; 
 
 async function fetchShield(targetUrl: string, referer?: string) {
     let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
-    if (referer) fullUrl += `&referer=${encodeURIComponent(referer)}`;
+    
+    // Mimic a standard browser to avoid basic blocks
+    fullUrl += `&headers=${encodeURIComponent(JSON.stringify({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': referer || 'https://gogoanimes.fi/'
+    }))}`;
     
     try {
         const res = await fetch(fullUrl);
@@ -87,54 +93,71 @@ class CustomGogo {
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-
-        // 🟢 STRATEGY 1: ANIYOMI API (The Secret Weapon)
-        // This API is used by mobile apps and is rarely blocked.
-        try {
-            console.log(chalk.gray("      Trying Aniyomi API..."));
-            const aniyomiUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}?server=gogocdn`;
-            const res = await fetch(aniyomiUrl);
-            
-            if (res.ok) {
-                const data = await res.json();
-                // Check if we got sources
-                if (data.sources && data.sources.length > 0) {
-                    // Find the best quality (default/backup/1080p)
-                    const bestSource = data.sources.find((s: any) => s.quality === "default") || data.sources[0];
-                    console.log(chalk.green(`      🎉 ANIYOMI SUCCESS: ${bestSource.url}`));
-                    return { sources: [{ url: bestSource.url, quality: 'default', isM3U8: true }] };
-                }
-            }
-        } catch (e) {
-            console.log(chalk.yellow(`      ⚠️ Aniyomi failed: ${e}`));
-        }
-
-        // 🟢 STRATEGY 2: AJAX API (The Official Method)
-        // We try to hit the ajax endpoint directly to get the crypto-encrypted links
-        // (Simplified version: assume we get lucky with unencrypted fallback)
-        try {
-            console.log(chalk.gray("      Trying AJAX API..."));
-            // We need to scrape the episode page first to get the vidcdn ID
-            for (const domain of this.mirrors) {
+        
+        for (const domain of this.mirrors) {
+            try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
                 if (!html) continue;
-                
-                const $ = cheerio.load(html);
-                let embedUrl = $('.anime_muti_link ul li.vidcdn a').attr('data-video') || $('iframe').first().attr('src');
-                
-                if (embedUrl) {
-                    if (embedUrl.startsWith('//')) embedUrl = 'https:' + embedUrl;
-                    console.log(chalk.gray(`      Found Embed: ${embedUrl}`));
-                    
-                    // We just return the embed directly if all else fails. 
-                    // Your frontend MIGHT be able to play it if it supports iframes.
-                    // This is a "Hail Mary" pass.
-                    return { sources: [{ url: embedUrl, quality: 'iframe', isM3U8: false }] };
-                }
-            }
-        } catch (e) {}
 
-        throw new Error("Gogo Watch Failed - All strategies exhausted");
+                const $ = cheerio.load(html);
+
+                // 🟢 STEP 1: EXTRACT THE RAW ID
+                // We don't want the full URL yet, we just want the ID of the video (e.g. "MTIzNDU=")
+                // It's usually inside the iframe src URL: .../streaming.php?id=MTIzNDU=&...
+                let iframeSrc = $('iframe').first().attr('src') || "";
+                
+                // Also check specific buttons for the ID
+                const vidcdnSrc = $('li.vidcdn a').attr('data-video');
+                if (vidcdnSrc) iframeSrc = vidcdnSrc;
+
+                // Extract the ID parameter
+                const idMatch = iframeSrc.match(/[?&]id=([^&]+)/);
+                
+                if (idMatch && idMatch[1]) {
+                    const cleanId = idMatch[1];
+                    console.log(chalk.green(`      Found Video ID: ${cleanId}`));
+
+                    // 🟢 STEP 2: CONSTRUCT THE EMBTAKU URL
+                    // Instead of using the weird Gogo player, we go straight to the source
+                    const embtakuUrl = `https://embtaku.pro/streaming.php?id=${cleanId}`;
+                    console.log(chalk.gray(`      Force-Switching to: ${embtakuUrl}`));
+
+                    // 🟢 STEP 3: SCRAPE EMBTAKU
+                    try {
+                        const playerHtml = await fetchShield(embtakuUrl, domain);
+                        
+                        // Look for the "file": "..." pattern
+                        const fileMatch = playerHtml.match(/file:\s*['"]([^'"]+\.m3u8)['"]/);
+                        
+                        if (fileMatch && fileMatch[1]) {
+                            console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${fileMatch[1]}`));
+                            return { sources: [{ url: fileMatch[1], quality: 'default', isM3U8: true }] };
+                        }
+                        
+                        // Backup: Look for JWPlayer setup
+                        const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
+                        if (jwMatch && jwMatch[1]) {
+                             const jwFile = jwMatch[1].match(/file:\s*['"]([^'"]+)['"]/);
+                             if (jwFile && jwFile[1]) {
+                                 console.log(chalk.green(`      🎉 EXTRACTED JWPLAYER: ${jwFile[1]}`));
+                                 return { sources: [{ url: jwFile[1], quality: 'default', isM3U8: true }] };
+                             }
+                        }
+
+                        // 🟢 STEP 4: IFRAME FALLBACK
+                        // If we can't extract the link, return the cleaned Embtaku URL.
+                        // Many players CAN play this URL directly because it's a standard embed.
+                        console.log(chalk.yellow("      ⚠️ Extraction failed, returning clean Embed URL."));
+                        return { sources: [{ url: embtakuUrl, quality: 'iframe', isM3U8: false }] };
+
+                    } catch(err) {
+                        console.log(chalk.red(`      ⚠️ Embtaku Error: ${err}`));
+                    }
+                }
+            } catch(e) {}
+        }
+        
+        throw new Error("Gogo Watch Failed - Could not find video ID");
     }
 }
 
