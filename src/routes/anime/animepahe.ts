@@ -1,28 +1,22 @@
 import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
-import { ANIME } from '@consumet/extensions';
 
 // 🟢 YOUR PROXY URL
 const PROXY_URL = "https://anime-proxyc.sudeepb9880.workers.dev"; 
 
-// 🟢 NEW SHIELD FUNCTION: Accepts a custom Referer
+// Helper to fetch via your Proxy Shield
 async function fetchShield(targetUrl: string, referer?: string) {
     let fullUrl = `${PROXY_URL}?url=${encodeURIComponent(targetUrl)}`;
-    if (referer) fullUrl += `&referer=${encodeURIComponent(referer)}`; // Pass the key to the Worker
-    
+    if (referer) fullUrl += `&referer=${encodeURIComponent(referer)}`;
     const res = await fetch(fullUrl);
     if (!res.ok) throw new Error(`Shield Status: ${res.status}`);
     return await res.text();
 }
 
-// --- 1. GOGO SCRAPER (Fixed Referrer Logic) ---
+// --- 1. GOGO SCRAPER (Mobile Mode) ---
 class CustomGogo {
-    mirrors = [
-        "https://gogoanimes.fi", 
-        "https://anitaku.pe",
-        "https://gogoanime3.co"
-    ];
+    mirrors = ["https://gogoanimes.fi", "https://anitaku.pe", "https://gogoanime3.co"];
 
     async search(query: string) {
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -38,13 +32,10 @@ class CustomGogo {
 
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
-        
         for (const domain of this.mirrors) {
             try {
-                // Step 1: Get the Page
                 const html = await fetchShield(`${domain}/category/${id}`);
-                
-                if (html.includes("WAF") || html.includes("Verify you are human")) continue;
+                if (html.includes("WAF") || html.includes("Verify")) continue;
 
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
@@ -53,13 +44,9 @@ class CustomGogo {
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id on ${domain}!`));
-                    
-                    // 🟢 THE FIX: Pass the domain as the Referrer
+                    // Use the domain itself as the AJAX base
                     const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                    
-                    // We tell the Worker: "Tell Gogo we came from ${domain}"
                     const epHtml = await fetchShield(ajaxUrl, domain);
-                    
                     const $ep = cheerio.load(epHtml);
                     const episodes: any[] = [];
                     $ep('li').each((i, el) => {
@@ -67,14 +54,11 @@ class CustomGogo {
                         const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                         if (epId) episodes.push({ id: epId, number: Number(epNum) });
                     });
-                    
                     if (episodes.length > 0) return { id, title: id, episodes: episodes.reverse() };
                 }
-            } catch (e) {
-                console.log(chalk.yellow(`      -> Failed on ${domain} (AJAX Blocked?), trying next...`));
-            }
+            } catch (e) {}
         }
-        throw new Error("Gogo Info Failed (All mirrors blocked)");
+        throw new Error("Gogo Info Failed");
     }
 
     async fetchEpisodeSources(episodeId: string) {
@@ -90,7 +74,7 @@ class CustomGogo {
     }
 }
 
-// --- 2. PAHE SCRAPER (Working) ---
+// --- 2. PAHE SCRAPER (The MVP) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
     headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
@@ -121,7 +105,6 @@ class CustomPahe {
 
     async fetchEpisodeSources(episodeId: string) {
         try {
-            if(!episodeId.includes("*")) throw new Error("Invalid ID");
             const [animeId, epId] = episodeId.split("*");
             const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
             const html = await res.text();
@@ -132,21 +115,8 @@ class CustomPahe {
     }
 }
 
-// --- 3. HIANIME (Shielded) ---
-class ShieldedHianime {
-    async fetchEpisodeSources(episodeId: string) {
-        const p = new ANIME.Hianime();
-        const servers = ["vidcloud", "megacloud", "streamtape"];
-        for (const server of servers) { 
-            try { return await p.fetchEpisodeSources(episodeId, server as any); } catch (e) {} 
-        }
-        throw new Error("No servers");
-    }
-}
-
 const customGogo = new CustomGogo();
 const customPahe = new CustomPahe();
-const shieldedHianime = new ShieldedHianime();
 
 const routes = async (fastify: FastifyInstance, options: any) => {
   const safeRun = async (providerName: string, fn: () => Promise<any>, reply: any) => {
@@ -161,6 +131,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
+  // Only Pahe and Gogo. Hianime is removed.
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
@@ -172,10 +143,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return customPahe.fetchEpisodeSources(id);
   }, res));
 
-  fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
-  fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
-  fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', () => shieldedHianime.fetchEpisodeSources(req.params.episodeId), res));
-
+  // Proxy Route
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
@@ -183,7 +151,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const fullUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
         const response = await fetch(fullUrl);
         reply.header("Access-Control-Allow-Origin", "*");
-        reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         reply.send(Buffer.from(await response.arrayBuffer()));
     } catch (e) { reply.status(500).send({ error: "Proxy Error" }); }
   });
