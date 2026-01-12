@@ -13,22 +13,14 @@ async function fetchShield(targetUrl: string, referer?: string) {
         if (!res.ok) throw new Error(`Shield Status: ${res.status}`);
         return await res.text();
     } catch (e) {
-        console.log(chalk.red(`   ⚠️ Proxy Fail on ${targetUrl}: ${e}`));
+        // console.log(chalk.red(`   ⚠️ Proxy Fail on ${targetUrl}: ${e}`));
         return "";
     }
 }
 
 class CustomGogo {
-    // 🟢 CHANGED ORDER: Put anitaku.pe first (often less blocked)
-    mirrors = ["https://anitaku.pe", "https://gogoanime3.co", "https://gogoanimes.fi"];
+    mirrors = ["https://gogoanimes.fi", "https://anitaku.pe", "https://gogoanime3.co"];
     
-    ajaxDomains = [
-        "https://ajax.gogo-load.com", 
-        "https://ajax.gogocdn.net", 
-        "https://ajax.goload.pro",
-        "https://disqus.gogocdn.net"
-    ];
-
     async search(query: string) {
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         return { 
@@ -45,31 +37,38 @@ class CustomGogo {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
         for (const domain of this.mirrors) {
-            console.log(chalk.gray(`      Trying mirror: ${domain}`));
             const html = await fetchShield(`${domain}/category/${id}`);
             
             if (!html || html.includes("WAF") || html.includes("Verify")) {
-                console.log(chalk.yellow(`      ⚠️ Blocked/Captcha on ${domain}`));
                 continue;
             }
 
             const $ = cheerio.load(html);
             const movie_id = $('#movie_id').attr('value');
             const alias = $('#alias_anime').attr('value');
-            let ep_end = $('#episode_page a').last().attr('ep_end');
-            if (!ep_end) ep_end = "2000"; 
+            let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
             if (movie_id) {
                 console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
                 
-                for (const ajaxBase of this.ajaxDomains) {
+                // 🟢 KEY FIX: Try the AJAX endpoint on the SAME DOMAIN first
+                // If gogoanimes.fi worked, gogoanimes.fi/ajax/... should also work!
+                const ajaxStrategies = [
+                    `${domain}/ajax/load-list-episode`,  // <--- The "Same Origin" Strategy
+                    "https://ajax.gogo-load.com/ajax/load-list-episode",
+                    "https://ajax.gogocdn.net/ajax/load-list-episode"
+                ];
+
+                for (const ajaxBase of ajaxStrategies) {
                     try {
-                        const ajaxUrl = `${ajaxBase}/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                        const ajaxUrl = `${ajaxBase}?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                        
+                        // Use the current domain as referer
                         const epHtml = await fetchShield(ajaxUrl, domain); 
                         
-                        // 🟢 CAPTCHA CHECK
-                        if (epHtml.includes("security") || epHtml.includes("captcha")) {
-                             console.log(chalk.red(`      ⛔ Captcha hit on ${ajaxBase}`));
+                        // Check for Cloudflare Challenge
+                        if (epHtml.includes("<title>Redirecting...</title>") || epHtml.includes("Just a moment")) {
+                             console.log(chalk.yellow(`      ⚠️ Cloudflare Challenge on ${ajaxBase}`));
                              continue;
                         }
 
@@ -84,9 +83,6 @@ class CustomGogo {
                         if (episodes.length > 0) {
                             console.log(chalk.green(`      🎉 Success: Connected to ${ajaxBase} (${episodes.length} eps)`));
                             return { id, title: id, episodes: episodes.reverse() };
-                        } else {
-                             // Log what we got if it failed (first 100 chars)
-                             console.log(chalk.yellow(`      ⚠️ Empty list from ${ajaxBase}. Response start: ${epHtml.substring(0, 100)}`));
                         }
                     } catch (e) {}
                 }
@@ -123,17 +119,15 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     }
   };
 
-  // 🟢 Force Gogo
+  // Force Gogo logic
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Redirect Pahe
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Proxy Route
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
