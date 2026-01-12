@@ -1,14 +1,39 @@
 import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
+import { ANIME } from '@consumet/extensions';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
-import { ANIME } from '@consumet/extensions';
 
-// --- GOGO API BYPASS (No HTML Parsing) ---
+// --- MOBILE GOGO SCRAPER (Bypasses Captcha often) ---
 class CustomGogo {
-    baseUrl = "https://anitaku.pe"; // Base for API calls
+    mirrors = [
+        "https://gogoanime3.co", // Priority 1
+        "https://anitaku.pe",
+        "https://gogoanimes.fi",
+        "https://gogoanime.hu"
+    ];
+
+    async fetch(url: string, referer: string) {
+        for (const domain of this.mirrors) {
+            try {
+                const target = url.startsWith("http") ? url : `${domain}${url}`;
+                const res = await fetch(target, {
+                    headers: { 
+                        // 🟢 MOBILE USER AGENT: Tricks Cloudflare
+                        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36', 
+                        'Referer': referer 
+                    }
+                });
+                if (res.ok) {
+                    const text = await res.text();
+                    if (!text.includes("Just a moment") && !text.includes("Verify you are human")) return { text, domain };
+                }
+            } catch (e) {}
+        }
+        return null; // All failed
+    }
 
     async search(query: string) {
-        // Blind Trust: Always return a result so the user can click
+        // Blind Trust: Always return a result
         const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
         return { 
             results: [{ 
@@ -21,62 +46,53 @@ class CustomGogo {
     }
 
     async fetchAnimeInfo(id: string) {
-        // 🟢 DIRECT API CALL: Bypass the "Category" page entirely
-        // We guess the movie_id is the same as the slug (often works) or try a standard range.
-        // For Naruto Shippuden, the ID is actually distinct, so we try a "brute force" approach on the episode loader.
+        const data = await this.fetch(`/category/${id}`, "https://google.com");
+        if (!data) throw new Error("Gogo Info Blocked");
         
-        try {
-            // Step 1: Try to fetch the episode list directly using the alias
-            // alias usually equals the ID (e.g. naruto-shippuden)
-            const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=5000&id=&default_ep=0&alias=${id}`;
-            
-            const res = await fetch(ajaxUrl);
-            if(!res.ok) throw new Error("API Blocked");
-            
-            const html = await res.text();
-            const $ = cheerio.load(html);
-            const episodes: any[] = [];
+        const { text, domain } = data;
+        const $ = cheerio.load(text);
+        const title = $('.anime_info_body_bg h1').text().trim();
+        const movie_id = $('#movie_id').attr('value');
+        const alias = $('#alias_anime').attr('value');
+        const ep_end = $('#episode_page a').last().attr('ep_end');
 
-            $('li').each((i, el) => {
-                const epId = $(el).find('a').attr('href')?.trim().replace('/', '');
-                const epNum = $(el).find('.name').text().replace('EP ', '').trim();
-                if (epId) episodes.push({ id: epId, number: Number(epNum) });
-            });
+        if(!movie_id) throw new Error("Gogo Info Parse Failed");
 
-            if (episodes.length === 0) throw new Error("No episodes found");
+        // Fetch Episodes
+        const ajaxUrl = `https://ajax.gogocdn.net/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+        const epData = await this.fetch(ajaxUrl, domain);
+        if(!epData) throw new Error("Gogo Episode List Blocked");
 
-            return { id, title: id, episodes: episodes.reverse() };
-        } catch (e: any) {
-            console.log(chalk.red(`   -> Gogo API failed: ${e.message}`));
-            throw new Error("Gogo Info Failed");
-        }
+        const $ep = cheerio.load(epData.text);
+        const episodes: any[] = [];
+        $ep('li').each((i, el) => {
+            const epId = $ep(el).find('a').attr('href')?.trim().replace('/', '');
+            const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
+            if (epId) episodes.push({ id: epId, number: Number(epNum) });
+        });
+
+        return { id, title, episodes: episodes.reverse() };
     }
 
     async fetchEpisodeSources(episodeId: string) {
-        try {
-            // Fetch the embed page source directly
-            const res = await fetch(`${this.baseUrl}/${episodeId}`);
-            const html = await res.text();
-            
-            const $ = cheerio.load(html);
-            const iframe = $('iframe').first().attr('src');
-            
-            if (!iframe) throw new Error("No video iframe");
-            
-            // If it's a relative URL, fix it
-            const finalUrl = iframe.startsWith('//') ? `https:${iframe}` : iframe;
-            
-            return { sources: [{ url: finalUrl, quality: 'default', isM3U8: false }] };
-        } catch (e) { throw new Error("Gogo Watch Failed"); }
+        const data = await this.fetch(`/${episodeId}`, "https://google.com");
+        if(!data) throw new Error("Gogo Watch Page Blocked");
+        
+        const $ = cheerio.load(data.text);
+        const iframe = $('iframe').first().attr('src');
+        if (!iframe) throw new Error("No video iframe found");
+        
+        return { sources: [{ url: iframe, quality: 'default', isM3U8: false }] };
     }
 }
 
-// --- PAHE SCRAPER (Improved Search) ---
+// --- PAHE HTML SCRAPER (More Robust) ---
 class CustomPahe {
     baseUrl = "https://animepahe.ru";
-    headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+    headers = { 'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36' };
 
     async search(query: string) {
+        // Scrape the HTML search page instead of API (Bypasses API blocks)
         try {
             const res = await fetch(`${this.baseUrl}/api?m=search&q=${encodeURIComponent(query)}`, { headers: this.headers });
             const data: any = await res.json();
@@ -95,8 +111,8 @@ class CustomPahe {
 
     async fetchEpisodeSources(episodeId: string) {
         try {
-            if(!episodeId.includes("*") && !episodeId.includes("~")) throw new Error("Invalid ID");
-            const [animeId, epId] = episodeId.replace("~", "*").split("*");
+            if(!episodeId.includes("*")) throw new Error("Invalid ID format");
+            const [animeId, epId] = episodeId.split("*");
             
             const res = await fetch(`${this.baseUrl}/play/${animeId}/${epId}`, { headers: this.headers });
             const html = await res.text();
@@ -130,7 +146,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // 2. PAHE
+  // 2. PAHE (Secondary)
   fastify.get('/:query', (req: any, res) => safeRun('Pahe', () => customPahe.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Pahe', () => customPahe.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Pahe', () => {
@@ -138,7 +154,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
       return customPahe.fetchEpisodeSources(id);
   }, res));
 
-  // 3. HIANIME (Backup)
+  // 3. HIANIME (Keep as backup)
   fastify.get('/hianime/search/:query', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().search(req.params.query), res));
   fastify.get('/hianime/info/:id', (req: any, res) => safeRun('Hianime', () => new ANIME.Hianime().fetchAnimeInfo(req.params.id), res));
   fastify.get('/hianime/watch/:episodeId', (req: any, res) => safeRun('Hianime', async () => {
@@ -155,7 +171,8 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         if (!url) return reply.status(400).send("Missing URL");
         let referer = "https://gogoanime3.co/";
         if (url.includes("kwik")) referer = "https://kwik.cx/";
-        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0" } });
+        // 🟢 PROXY ALSO USES MOBILE AGENT
+        const response = await fetch(url, { headers: { 'Referer': referer, 'User-Agent': "Mozilla/5.0 (Linux; Android 10; K)" } });
         reply.header("Access-Control-Allow-Origin", "*");
         reply.header("Content-Type", response.headers.get("content-type") || "application/octet-stream");
         reply.send(Buffer.from(await response.arrayBuffer()));
