@@ -2,27 +2,24 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
+// 🟢 PUBLIC PROXIES (For Local Scrape)
 const PROXIES = [
     "https://corsproxy.io/?",
     "https://api.codetabs.com/v1/proxy?quest=",
     "https://api.allorigins.win/raw?url="
 ];
 
-// Helper to fetch using proxies
 async function fetchShield(targetUrl: string) {
-    // 1. Try Direct
     try {
         const res = await fetch(targetUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': 'https://gogoanimes.fi/',
-                'X-Requested-With': 'XMLHttpRequest' // 🟢 Added for AJAX stability
             }
         });
         if (res.ok) return await res.text();
     } catch (e) {}
 
-    // 2. Try Proxies
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
@@ -71,8 +68,6 @@ class CustomGogo {
 
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
-        
-        // ID Cleaning
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
         console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
 
@@ -107,15 +102,7 @@ class CustomGogo {
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id}`));
-                    
-                    // 🟢 ENHANCED AJAX LIST
-                    // We prioritize the domain's own ajax endpoint to avoid cross-origin blocks
-                    const ajaxDomains = [
-                        `${domain}/ajax`,
-                        "https://ajax.gogo-load.com/ajax",
-                        "https://ajax.gogocdn.net/ajax"
-                    ];
-
+                    const ajaxDomains = [`${domain}/ajax`, "https://ajax.gogo-load.com/ajax", "https://ajax.gogocdn.net/ajax"];
                     let listHtml = "";
                     for (const ajaxBase of ajaxDomains) {
                         const ajaxUrl = `${ajaxBase}/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
@@ -132,7 +119,6 @@ class CustomGogo {
                             const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                             if (epId) episodes.push({ id: epId, number: Number(epNum) });
                         });
-                        console.log(chalk.green(`      🎉 Found ${episodes.length} episodes`));
                         return { id, title, image, description: desc, episodes: episodes.reverse() };
                     }
                 }
@@ -144,7 +130,7 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 1. Local Scrape (Best Quality)
+        // 1. LOCAL SCRAPE (Best Quality)
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
@@ -156,7 +142,8 @@ class CustomGogo {
                      console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
                      return { sources: [{ url: downloadLink, quality: 'default', isM3U8: false }] };
                 }
-
+                
+                // Embed Extraction
                 let embedUrl = $('iframe').first().attr('src') || $('.anime_muti_link ul li.vidcdn a').attr('data-video');
                 if (embedUrl) {
                     if (embedUrl.startsWith('//')) embedUrl = `https:${embedUrl}`;
@@ -170,24 +157,47 @@ class CustomGogo {
             } catch(e) {}
         }
 
-        // 🟢 2. NEW BACKUP: AMVStream API
-        // Replaces the broken Consumet API
-        try {
-            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling AMVStr API...`));
-            const backupUrl = `https://api.amvstr.me/api/v2/stream/${episodeId}`;
-            const res = await fetch(backupUrl);
-            const data = await res.json() as any;
-            
-            if (data && data.stream && data.stream.multi && data.stream.multi.main) {
-                const url = data.stream.multi.main.url;
-                console.log(chalk.green(`      🎉 AMVSTR SUCCESS: ${url}`));
-                return { sources: [{ url: url, quality: 'default', isM3U8: true }] };
+        // 🟢 2. HYDRA BACKUP SYSTEM (Try 3 APIs in order)
+        const BACKUP_APIS = [
+            `https://consumet-api-drab.vercel.app/anime/gogoanime/watch/${episodeId}`, // Backup 1 (Consumet Mirror)
+            `https://api.amvstr.me/api/v2/stream/${episodeId}`,                       // Backup 2 (AmvStr)
+            `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`             // Backup 3 (Original)
+        ];
+
+        console.log(chalk.yellow(`      ⚠️ Local scrape failed. Engaging Hydra Backups...`));
+
+        for (const apiUrl of BACKUP_APIS) {
+            try {
+                console.log(chalk.gray(`      Trying API: ${apiUrl}`));
+                const res = await fetch(apiUrl, { 
+                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } // Fake browser
+                });
+                
+                if (!res.ok) continue;
+
+                const data = await res.json() as any;
+                let finalUrl = "";
+
+                // Handle Different API Formats
+                if (data.sources) {
+                    // Consumet Format
+                    const best = data.sources.find((s:any) => s.quality === 'default' || s.quality === '1080p') || data.sources[0];
+                    if (best) finalUrl = best.url;
+                } else if (data.stream && data.stream.multi && data.stream.multi.main) {
+                    // AmvStr Format
+                    finalUrl = data.stream.multi.main.url;
+                }
+
+                if (finalUrl) {
+                    console.log(chalk.green(`      🎉 HYDRA SUCCESS: ${finalUrl}`));
+                    return { sources: [{ url: finalUrl, quality: 'default', isM3U8: true }] };
+                }
+            } catch(e) {
+                console.log(chalk.red(`      API Failed: ${e}`));
             }
-        } catch(e) {
-            console.log(chalk.red(`      AMVStr failed: ${e}`));
         }
 
-        // Fallback
+        // Final Fallback
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
@@ -201,7 +211,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const res = await fn();
         return reply.send(res);
     } catch (e: any) {
-        console.error(chalk.red(`Error:`), e.message);
         return reply.status(200).send({ error: e.message, results: [] });
     }
   };
