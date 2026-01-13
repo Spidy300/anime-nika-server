@@ -2,49 +2,35 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// 🟢 THE SHIELD WALL (Public Proxies)
-// We will cycle through these to hide your server's identity
 const PROXIES = [
-    "https://corsproxy.io/?", 
+    "https://corsproxy.io/?",
     "https://api.codetabs.com/v1/proxy?quest=",
-    "https://thingproxy.freeboard.io/fetch/"
+    "https://api.allorigins.win/raw?url="
 ];
 
 async function fetchShield(targetUrl: string) {
-    // 1. Try Direct first (Just in case it works for some files)
+    // 1. Try Direct (Fastest)
     try {
         const res = await fetch(targetUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': 'https://gogoanimes.fi/'
             }
         });
         if (res.ok) return await res.text();
     } catch (e) {}
 
-    // 2. Try The Shield Wall
+    // 2. Try Proxy Wall
     for (const proxy of PROXIES) {
         try {
-            const fullUrl = `${proxy}${encodeURIComponent(targetUrl)}`;
-            const res = await fetch(fullUrl);
-            
+            // console.log(chalk.gray(`      🛡️ Tunneling via: ${proxy}`));
+            const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
             if (res.ok) {
                 const text = await res.text();
-                // Ensure we didn't get a block page
-                if (text.includes("<!DOCTYPE html") && text.length > 500) {
-                    return text;
-                }
+                if (text.includes("<html") && text.length > 500) return text;
             }
         } catch (e) {}
     }
-    
-    // 3. Last Resort: AllOrigins (Returns JSON)
-    try {
-        const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
-        const data = await res.json() as any;
-        if (data.contents) return data.contents;
-    } catch (e) {}
-
     return "";
 }
 
@@ -52,29 +38,82 @@ class CustomGogo {
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
     async search(query: string) {
-        const guessId = query.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-        return { 
-            results: [{ 
-                id: guessId, 
-                title: query, 
-                image: "https://gogocdn.net/cover/naruto-shippuden.png", 
-                releaseDate: "Gogo Only" 
-            }] 
-        };
+        // Simple search that returns a list
+        return this.internalSearch(query);
+    }
+
+    // Helper for search logic
+    async internalSearch(query: string) {
+        for (const domain of this.mirrors) {
+            try {
+                const searchUrl = `${domain}/search.html?keyword=${encodeURIComponent(query)}`;
+                const html = await fetchShield(searchUrl);
+                if (!html) continue;
+
+                const $ = cheerio.load(html);
+                const results: any[] = [];
+
+                $('.last_episodes ul li').each((i, el) => {
+                    const title = $(el).find('.name a').text().trim();
+                    const link = $(el).find('.name a').attr('href');
+                    const img = $(el).find('.img a img').attr('src');
+                    const releaseDate = $(el).find('.released').text().trim();
+                    
+                    if (title && link) {
+                        results.push({
+                            id: link.replace('/category/', '').trim(), // Extract clean ID
+                            title: title,
+                            image: img,
+                            releaseDate: releaseDate
+                        });
+                    }
+                });
+
+                if (results.length > 0) return { results };
+            } catch (e) {}
+        }
+        return { results: [] };
     }
 
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
+        let targetId = id;
+        let foundInfo = null;
+
+        // 🟢 ATTEMPT 1: Direct Category Lookup
+        foundInfo = await this.scrapeInfoPage(targetId);
+
+        // 🟢 ATTEMPT 2: Self-Healing (Search Fallback)
+        // If direct lookup failed (404), maybe the ID is wrong (e.g. "naruto-shippuden-355")
+        if (!foundInfo) {
+            console.log(chalk.yellow(`      ⚠️ Direct lookup failed. searching for "${id}"...`));
+            const searchData = await this.internalSearch(id.replace(/-/g, " "));
+            
+            if (searchData.results && searchData.results.length > 0) {
+                // Take the first result as the correct Anime ID
+                targetId = searchData.results[0].id;
+                console.log(chalk.green(`      🎉 Self-Healed ID: ${id} -> ${targetId}`));
+                foundInfo = await this.scrapeInfoPage(targetId);
+            }
+        }
+
+        if (foundInfo) return foundInfo;
+        throw new Error("Gogo Info Failed");
+    }
+
+    async scrapeInfoPage(id: string) {
         for (const domain of this.mirrors) {
             try {
-                // Info pages are usually not blocked, try direct first
-                let html = await fetchShield(`${domain}/category/${id}`);
-                if (!html) continue;
+                const html = await fetchShield(`${domain}/category/${id}`);
+                if (!html || html.includes("404 Not Found")) continue;
 
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
                 const alias = $('#alias_anime').attr('value');
+                const title = $('.anime_info_body_bg h1').text().trim();
+                const image = $('.anime_info_body_bg img').attr('src');
+                const desc = $('.anime_info_body_bg .description').text().trim();
                 let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
                 if (movie_id) {
@@ -82,7 +121,6 @@ class CustomGogo {
                     
                     const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
                     const listHtml = await fetchShield(ajaxUrl);
-                    
                     const $ep = cheerio.load(listHtml);
                     const episodes: any[] = [];
                     
@@ -93,21 +131,23 @@ class CustomGogo {
                         if (epId) episodes.push({ id: epId, number: Number(epNum) });
                     });
 
-                    if (episodes.length > 0) {
-                        console.log(chalk.green(`      🎉 Success: Found ${episodes.length} eps`));
-                        return { id, title: id, episodes: episodes.reverse() };
-                    }
+                    return { 
+                        id: id, 
+                        title: title, 
+                        image: image, 
+                        description: desc,
+                        episodes: episodes.reverse() 
+                    };
                 }
             } catch(e) {}
         }
-        throw new Error("Gogo Info Failed");
+        return null;
     }
 
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 STRATEGY: PROXY ASSAULT
-        // We will hit the download pages through our Shield Wall
+        // 🟢 PROXY TANK: Download Page Attack
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
             `https://gogoanimes.fi/download?id=${episodeId}`,
@@ -115,40 +155,33 @@ class CustomGogo {
         ];
 
         for (const url of downloadMirrors) {
-            console.log(chalk.gray(`      Trying download page via Shield: ${url}`));
-            
+            console.log(chalk.gray(`      Trying download page: ${url}`));
             const html = await fetchShield(url);
             if (!html) continue;
 
             const $ = cheerio.load(html);
             let bestUrl = "";
 
-            // Scan for MP4s (The "Golden" links)
             $('.mirror_link .dowload a, .dowload a').each((i, el) => {
                 const href = $(el).attr('href');
                 const text = $(el).text().trim().toUpperCase();
                 
                 if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
                     if (href.startsWith("http")) {
-                        // Priority: 1080 > 720
-                        if (!bestUrl || text.includes("1080")) {
-                            bestUrl = href;
-                        }
+                        if (!bestUrl || text.includes("1080")) bestUrl = href;
                     }
                 }
             });
 
             if (bestUrl) {
                 console.log(chalk.green(`      🎉 PROXY SUCCESS: ${bestUrl}`));
-                // isM3U8: false (Direct MP4s play everywhere)
                 return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
             }
         }
 
-        // 🟢 FALLBACK: If Proxy fails, try to return the raw Embed URL
-        // Sometimes the frontend can play the iframe even if the backend can't scrape it
+        // 🟢 FALLBACK: Raw Embed
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning raw embed: ${fallbackUrl}`));
+        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning fallback: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -172,18 +205,18 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Default
+  // Legacy/Default Routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
+  // Proxy Tunnel for Video
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
         if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
 
-        // Use Proxy Shield for the video playback too if needed
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const response = await fetch(proxyUrl);
         
