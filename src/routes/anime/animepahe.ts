@@ -37,7 +37,6 @@ async function fetchShield(targetUrl: string) {
 class CustomGogo {
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
 
-    // ... Search and Info logic remains valid ...
     async search(query: string) { return this.internalSearch(query); }
 
     async internalSearch(query: string) {
@@ -70,12 +69,18 @@ class CustomGogo {
     }
 
     async fetchAnimeInfo(id: string) {
-        // Smart ID Cleaner
+        console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
+        
+        // 🟢 AGGRESSIVE ID CLEANING
+        // Fixes "naruto-shippuden-355" -> "naruto-shippuden"
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
+        console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
+
         let foundInfo = await this.scrapeInfoPage(cleanId);
         if (!foundInfo && cleanId !== id) foundInfo = await this.scrapeInfoPage(id);
         
         if (!foundInfo) {
+            console.log(chalk.yellow(`      Direct lookups failed. Searching...`));
             const searchData = await this.internalSearch(cleanId.replace(/-/g, " "));
             if (searchData.results && searchData.results.length > 0) {
                 foundInfo = await this.scrapeInfoPage(searchData.results[0].id);
@@ -101,13 +106,9 @@ class CustomGogo {
                 if (image && !image.startsWith('http')) image = `https://gogocdn.net${image}`;
 
                 if (movie_id) {
-                    const ajaxDomains = ["https://ajax.gogo-load.com/ajax", "https://ajax.gogocdn.net/ajax", `${domain}/ajax`];
-                    let listHtml = "";
-                    for (const ajaxBase of ajaxDomains) {
-                        const ajaxUrl = `${ajaxBase}/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                        listHtml = await fetchShield(ajaxUrl);
-                        if (listHtml) break;
-                    }
+                    console.log(chalk.green(`      ✅ Found movie_id: ${movie_id}`));
+                    const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                    const listHtml = await fetchShield(ajaxUrl);
                     if (listHtml) {
                         const $ep = cheerio.load(listHtml);
                         const episodes: any[] = [];
@@ -125,53 +126,59 @@ class CustomGogo {
         return null;
     }
 
-    // 🟢 UPDATED: DIRECT PLAYER EXTRACTION
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
+        // 🟢 STRATEGY 1: PROXY SCRAPE
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
                 if (!html) continue;
                 const $ = cheerio.load(html);
 
-                // 1. Get the Embed URL
+                // Try to find specific "Download" links first (Easiest)
+                let downloadLink = $('.dowload a').attr('href');
+                if (downloadLink && downloadLink.includes('.mp4')) {
+                     console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
+                     return { sources: [{ url: downloadLink, quality: 'default', isM3U8: false }] };
+                }
+
+                // Try to find the Embed
                 let embedUrl = $('iframe').first().attr('src') || $('.anime_muti_link ul li.vidcdn a').attr('data-video');
-                
                 if (embedUrl) {
                     if (embedUrl.startsWith('//')) embedUrl = `https:${embedUrl}`;
                     console.log(chalk.gray(`      Found Embed: ${embedUrl}`));
-
-                    // 2. Visit the Embed URL via Proxy
+                    
+                    // Try to dig into the embed
                     const playerHtml = await fetchShield(embedUrl);
-                    
-                    // 3. Regex Hunt for M3U8
-                    // Matches file: 'https://...m3u8'
                     const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/);
-                    
                     if (m3u8Match && m3u8Match[1]) {
                         console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
                         return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
-                    }
-                    
-                    // 4. Regex Hunt for JWPlayer Sources
-                    const jwMatch = playerHtml.match(/sources:\s*(\[\{.*?\}\])/s);
-                    if (jwMatch && jwMatch[1]) {
-                         const cleanJson = jwMatch[1].replace(/file:/g, '"file":').replace(/label:/g, '"label":').replace(/type:/g, '"type":').replace(/'/g, '"');
-                         try {
-                             const sources = JSON.parse(cleanJson);
-                             const best = sources.find((s:any) => s.file.includes('.m3u8')) || sources[0];
-                             console.log(chalk.green(`      🎉 EXTRACTED JWPLAYER: ${best.file}`));
-                             return { sources: [{ url: best.file, quality: 'default', isM3U8: true }] };
-                         } catch(e) {}
                     }
                 }
             } catch(e) {}
         }
 
-        // Fallback to Iframe if extraction fails
+        // 🟢 STRATEGY 2: EXTERNAL BACKUP (The "Master Key")
+        // If local scraping fails, we ask a public API to do it for us.
+        try {
+            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling Backup API...`));
+            const backupUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
+            const res = await fetch(backupUrl);
+            const data = await res.json();
+            
+            if (data.sources && data.sources.length > 0) {
+                const best = data.sources.find((s:any) => s.quality === 'default') || data.sources[0];
+                console.log(chalk.green(`      🎉 BACKUP API SUCCESS: ${best.url}`));
+                return { sources: [{ url: best.url, quality: 'default', isM3U8: true }] };
+            }
+        } catch(e) {
+            console.log(chalk.red(`      Backup API failed: ${e}`));
+        }
+
+        // Final Fallback
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning fallback: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
