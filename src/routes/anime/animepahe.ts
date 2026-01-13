@@ -2,7 +2,6 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// 🟢 MOBILE AGENT (Forces Simple Player)
 const MOBILE_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
 
 const PROXIES = [
@@ -35,7 +34,6 @@ async function fetchShield(targetUrl: string) {
 }
 
 class CustomGogo {
-    // 🟢 FORCE REAL DOMAINS
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
 
     async search(query: string) { return this.internalSearch(query); }
@@ -70,9 +68,7 @@ class CustomGogo {
     }
 
     async fetchAnimeInfo(id: string) {
-        console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
-        
         let foundInfo = await this.scrapeInfoPage(cleanId);
         if (!foundInfo && cleanId !== id) foundInfo = await this.scrapeInfoPage(id);
         
@@ -139,7 +135,6 @@ class CustomGogo {
                 // 1. MP4 Check
                 let downloadLink = $('.dowload a').attr('href');
                 if (downloadLink && downloadLink.includes('.mp4')) {
-                     console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
                      return { sources: [{ url: downloadLink, quality: 'default', isM3U8: false }] };
                 }
 
@@ -151,22 +146,24 @@ class CustomGogo {
                     
                     const playerHtml = await fetchShield(embedUrl);
                     
-                    // 🟢 UNIVERSAL REGEX HUNTER (Catches ANY m3u8 link)
-                    // This ignores the player type and just grabs the raw video file
+                    // Try to Extract M3U8
                     const universalMatch = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^\s"']*)/);
-                    
                     if (universalMatch && universalMatch[1]) {
                         console.log(chalk.green(`      🎉 UNIVERSAL EXTRACT: ${universalMatch[1]}`));
                         return { sources: [{ url: universalMatch[1], quality: 'default', isM3U8: true }] };
                     }
+                    
+                    // 🟢 FIX: If extraction fails, RETURN THE EMBED ITSELF
+                    // Do NOT fall back to the broken "embtaku" link.
+                    // This allows the frontend to iframe the working "newplayer.php".
+                    console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning Found Embed: ${embedUrl}`));
+                    return { sources: [{ url: embedUrl, quality: 'iframe', isM3U8: false }] };
                 }
             } catch(e) {}
         }
 
-        // 3. Fallback: Return Iframe directly
-        // If we can't extract the m3u8, we return the iframe so the browser can try to play it
+        // Final Fallback (Only if absolutely nothing was found)
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning Iframe: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -195,10 +192,8 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
         if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
-        
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const response = await fetch(proxyUrl);
-        
         reply.header("Access-Control-Allow-Origin", "*");
         const buffer = await response.arrayBuffer();
         reply.send(Buffer.from(buffer));
