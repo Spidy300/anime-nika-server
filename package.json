@@ -14,7 +14,7 @@
     "dependencies": {
         "@consumet/extensions": "^1.4.9", 
         "@fastify/cors": "^8.5.0",
-        "@types/node": "^18.11.17",
+        "@types/node": "^25.0.6",
         "@types/ws": "^8.5.3",
         "axios": "^1.0.0",
         "chalk": "4.1.2",
