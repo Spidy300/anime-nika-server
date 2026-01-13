@@ -8,6 +8,9 @@ const PROXIES = [
     "https://api.allorigins.win/raw?url="
 ];
 
+// 🟢 BASE URL for your Render Server (Used for wrapping images)
+const SERVER_URL = "https://anime-server-xzlh.onrender.com/anime/animepahe/proxy?url=";
+
 async function fetchShield(targetUrl: string) {
     try {
         const res = await fetch(targetUrl, {
@@ -55,8 +58,12 @@ class CustomGogo {
                     let img = $(el).find('.img a img').attr('src');
                     const releaseDate = $(el).find('.released').text().trim();
                     
-                    // 🟢 FIX: Ensure Image is Absolute
-                    if (img && !img.startsWith('http')) img = `https://gogocdn.net${img}`; // Default to GogoCDN
+                    // 🟢 FIX: Proxy the Image URL
+                    if (img) {
+                        if (!img.startsWith('http')) img = `https://gogocdn.net${img}`;
+                        // Wrap it in our proxy to bypass 403 Forbidden
+                        img = `${SERVER_URL}${encodeURIComponent(img)}`;
+                    }
 
                     if (title && link) {
                         results.push({
@@ -77,7 +84,7 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // 🟢 SMART ID CLEANER (Fixes the "naruto-shippuden-355" error)
+        // Smart ID Cleaner
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
         
         console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
@@ -85,14 +92,9 @@ class CustomGogo {
         // Attempt 1: Direct Lookup
         let foundInfo = await this.scrapeInfoPage(cleanId);
 
-        // Attempt 2: Raw ID Fallback
-        if (!foundInfo && cleanId !== id) {
-             foundInfo = await this.scrapeInfoPage(id);
-        }
-
-        // Attempt 3: Search Fallback
+        // Attempt 2: Search Fallback
         if (!foundInfo) {
-            console.log(chalk.yellow(`      Direct lookups failed. Searching for "${cleanId}"...`));
+            console.log(chalk.yellow(`      Direct lookup failed. Searching for "${cleanId}"...`));
             const searchData = await this.internalSearch(cleanId.replace(/-/g, " "));
             
             if (searchData.results && searchData.results.length > 0) {
@@ -120,8 +122,11 @@ class CustomGogo {
                 const desc = $('.anime_info_body_bg .description').text().trim();
                 let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
-                // 🟢 FIX: Ensure Image is Absolute
-                if (image && !image.startsWith('http')) image = `https://gogocdn.net${image}`;
+                // 🟢 FIX: Proxy the Image URL
+                if (image) {
+                    if (!image.startsWith('http')) image = `https://gogocdn.net${image}`;
+                    image = `${SERVER_URL}${encodeURIComponent(image)}`;
+                }
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
@@ -154,7 +159,6 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // Proxy Tank Strategy
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
             `https://gogoanimes.fi/download?id=${episodeId}`,
@@ -220,6 +224,8 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
+        
+        // Allow images to pass through
         if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
 
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
