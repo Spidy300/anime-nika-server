@@ -2,7 +2,7 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// 🟢 MOBILE USER AGENT (Triggers Mobile Player -> Easier to Scrape)
+// 🟢 MOBILE AGENT (Forces Simple Player)
 const MOBILE_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
 
 const PROXIES = [
@@ -12,7 +12,6 @@ const PROXIES = [
 ];
 
 async function fetchShield(targetUrl: string) {
-    // 1. Try Direct (Mobile Mode)
     try {
         const res = await fetch(targetUrl, {
             headers: {
@@ -23,7 +22,6 @@ async function fetchShield(targetUrl: string) {
         if (res.ok) return await res.text();
     } catch (e) {}
 
-    // 2. Try Proxies
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
@@ -37,8 +35,8 @@ async function fetchShield(targetUrl: string) {
 }
 
 class CustomGogo {
-    // 🟢 ONLY USE REAL DOMAINS
-    mirrors = ["https://anitaku.pe", "https://gogoanimes.fi"];
+    // 🟢 FORCE REAL DOMAINS
+    mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
 
     async search(query: string) { return this.internalSearch(query); }
 
@@ -74,6 +72,7 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
+        
         let foundInfo = await this.scrapeInfoPage(cleanId);
         if (!foundInfo && cleanId !== id) foundInfo = await this.scrapeInfoPage(id);
         
@@ -103,7 +102,7 @@ class CustomGogo {
                 if (image && !image.startsWith('http')) image = `https://gogocdn.net${image}`;
 
                 if (movie_id) {
-                    const ajaxDomains = ["https://ajax.gogo-load.com/ajax", "https://ajax.gogocdn.net/ajax"];
+                    const ajaxDomains = ["https://ajax.gogo-load.com/ajax", "https://ajax.gogocdn.net/ajax", `${domain}/ajax`];
                     let listHtml = "";
                     for (const ajaxBase of ajaxDomains) {
                         const ajaxUrl = `${ajaxBase}/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
@@ -131,56 +130,43 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 NUCLEAR METHOD: FORCE ANITAKU MOBILE
-        const domains = ["https://anitaku.pe", "https://gogoanimes.fi"];
-
-        for (const domain of domains) {
+        for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
                 if (!html) continue;
                 const $ = cheerio.load(html);
 
-                // 1. Check for Direct Download Link (Mobile pages often have this exposed)
+                // 1. MP4 Check
                 let downloadLink = $('.dowload a').attr('href');
                 if (downloadLink && downloadLink.includes('.mp4')) {
-                     console.log(chalk.green(`      🎉 FOUND MP4 (Mobile): ${downloadLink}`));
+                     console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
                      return { sources: [{ url: downloadLink, quality: 'default', isM3U8: false }] };
                 }
 
-                // 2. Check for Embed
+                // 2. Embed Extraction
                 let embedUrl = $('iframe').first().attr('src') || $('.anime_muti_link ul li.vidcdn a').attr('data-video');
                 if (embedUrl) {
                     if (embedUrl.startsWith('//')) embedUrl = `https:${embedUrl}`;
                     console.log(chalk.gray(`      Found Embed: ${embedUrl}`));
                     
-                    // 3. Attack the Embed with Mobile Agent
                     const playerHtml = await fetchShield(embedUrl);
                     
-                    // Regex for M3U8 (Works on 90% of Gogo players)
-                    const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/);
-                    if (m3u8Match && m3u8Match[1]) {
-                        console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
-                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
+                    // 🟢 UNIVERSAL REGEX HUNTER (Catches ANY m3u8 link)
+                    // This ignores the player type and just grabs the raw video file
+                    const universalMatch = playerHtml.match(/(https?:\/\/[^"']+\.m3u8[^\s"']*)/);
+                    
+                    if (universalMatch && universalMatch[1]) {
+                        console.log(chalk.green(`      🎉 UNIVERSAL EXTRACT: ${universalMatch[1]}`));
+                        return { sources: [{ url: universalMatch[1], quality: 'default', isM3U8: true }] };
                     }
                 }
             } catch(e) {}
         }
 
-        // 🟢 FINAL BACKUP: The "GogoCDN" API (Not Scraper)
-        // This hits the raw file server API directly, bypassing the website UI.
-        try {
-            console.log(chalk.yellow(`      ⚠️ Scrape failed. Trying Raw GogoCDN API...`));
-            const rawApiUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}?server=gogocdn`;
-            const res = await fetch(rawApiUrl);
-            const data = await res.json() as any;
-             if (data.sources) {
-                const best = data.sources.find((s:any) => s.quality === 'default') || data.sources[0];
-                console.log(chalk.green(`      🎉 RAW API SUCCESS: ${best.url}`));
-                return { sources: [{ url: best.url, quality: 'default', isM3U8: true }] };
-             }
-        } catch(e) {}
-
+        // 3. Fallback: Return Iframe directly
+        // If we can't extract the m3u8, we return the iframe so the browser can try to play it
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
+        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning Iframe: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -209,8 +195,10 @@ const routes = async (fastify: FastifyInstance, options: any) => {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
         if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
+        
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const response = await fetch(proxyUrl);
+        
         reply.header("Access-Control-Allow-Origin", "*");
         const buffer = await response.arrayBuffer();
         reply.send(Buffer.from(buffer));
