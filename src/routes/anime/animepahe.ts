@@ -2,35 +2,49 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// 🟢 THE PROXY ARSENAL
-// We use these services to hide your Render IP from Gogoanime
-const PROXY_GATES = [
+// 🟢 THE SHIELD WALL (Public Proxies)
+// We will cycle through these to hide your server's identity
+const PROXIES = [
     "https://corsproxy.io/?", 
-    "https://api.allorigins.win/raw?url=",
-    "https://api.codetabs.com/v1/proxy?quest="
+    "https://api.codetabs.com/v1/proxy?quest=",
+    "https://thingproxy.freeboard.io/fetch/"
 ];
 
 async function fetchShield(targetUrl: string) {
-    // We try every proxy until one works
-    for (const proxy of PROXY_GATES) {
+    // 1. Try Direct first (Just in case it works for some files)
+    try {
+        const res = await fetch(targetUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Referer': 'https://gogoanimes.fi/'
+            }
+        });
+        if (res.ok) return await res.text();
+    } catch (e) {}
+
+    // 2. Try The Shield Wall
+    for (const proxy of PROXIES) {
         try {
             const fullUrl = `${proxy}${encodeURIComponent(targetUrl)}`;
-            // console.log(chalk.gray(`      🛡️ Tunneling: ${proxy} -> ${targetUrl}`));
-            
-            const res = await fetch(fullUrl, {
-                headers: {
-                    // Fake a generic Chrome browser
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            });
+            const res = await fetch(fullUrl);
             
             if (res.ok) {
                 const text = await res.text();
-                // Simple check to ensure we didn't get a captcha page
-                if (text.includes("<html") && text.length > 500) return text;
+                // Ensure we didn't get a block page
+                if (text.includes("<!DOCTYPE html") && text.length > 500) {
+                    return text;
+                }
             }
         } catch (e) {}
     }
+    
+    // 3. Last Resort: AllOrigins (Returns JSON)
+    try {
+        const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`);
+        const data = await res.json() as any;
+        if (data.contents) return data.contents;
+    } catch (e) {}
+
     return "";
 }
 
@@ -52,13 +66,12 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // Try direct connection first for Info (usually not blocked as heavily)
         for (const domain of this.mirrors) {
             try {
-                const res = await fetch(`${domain}/category/${id}`);
-                if (!res.ok) continue;
-                const html = await res.text();
-                
+                // Info pages are usually not blocked, try direct first
+                let html = await fetchShield(`${domain}/category/${id}`);
+                if (!html) continue;
+
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
                 const alias = $('#alias_anime').attr('value');
@@ -67,17 +80,15 @@ class CustomGogo {
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
                     
-                    // Ajax load list
                     const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                    const listRes = await fetch(ajaxUrl);
-                    const listHtml = await listRes.text();
+                    const listHtml = await fetchShield(ajaxUrl);
                     
                     const $ep = cheerio.load(listHtml);
                     const episodes: any[] = [];
                     
                     $ep('li').each((i, el) => {
                         let epId = $ep(el).find('a').attr('href')?.trim() || "";
-                        epId = epId.replace(/^\//, ''); // Remove leading slash
+                        epId = epId.replace(/^\//, ''); 
                         const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                         if (epId) episodes.push({ id: epId, number: Number(epNum) });
                     });
@@ -95,8 +106,8 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 STRATEGY: PROXY DOWNLOAD PAGE ATTACK
-        // We do not guess. We force-visit the download mirrors via Proxy.
+        // 🟢 STRATEGY: PROXY ASSAULT
+        // We will hit the download pages through our Shield Wall
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
             `https://gogoanimes.fi/download?id=${episodeId}`,
@@ -104,24 +115,20 @@ class CustomGogo {
         ];
 
         for (const url of downloadMirrors) {
-            console.log(chalk.gray(`      Trying download page: ${url}`));
+            console.log(chalk.gray(`      Trying download page via Shield: ${url}`));
             
-            // Use the Proxy Tunnel
             const html = await fetchShield(url);
-            
             if (!html) continue;
 
             const $ = cheerio.load(html);
             let bestUrl = "";
 
-            // Scan for MP4s (Reliable, Unencrypted)
+            // Scan for MP4s (The "Golden" links)
             $('.mirror_link .dowload a, .dowload a').each((i, el) => {
                 const href = $(el).attr('href');
                 const text = $(el).text().trim().toUpperCase();
                 
-                // We are looking for "1080P", "720P", or "HDP"
-                if (href && (text.includes("1080") || text.includes("720") || text.includes("360") || text.includes("HDP"))) {
-                    // Ensure it's a valid link
+                if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
                     if (href.startsWith("http")) {
                         // Priority: 1080 > 720
                         if (!bestUrl || text.includes("1080")) {
@@ -133,16 +140,15 @@ class CustomGogo {
 
             if (bestUrl) {
                 console.log(chalk.green(`      🎉 PROXY SUCCESS: ${bestUrl}`));
-                // isM3U8: false (Because it's an MP4)
+                // isM3U8: false (Direct MP4s play everywhere)
                 return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
             }
         }
 
-        // 🔴 FAILSAFE: Return the embedded player URL as a fallback
-        // If we can't find an MP4, give the frontend the iframe. 
-        // Some frontends can handle iframes automatically.
+        // 🟢 FALLBACK: If Proxy fails, try to return the raw Embed URL
+        // Sometimes the frontend can play the iframe even if the backend can't scrape it
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning fallback embed: ${fallbackUrl}`));
+        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning raw embed: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -175,17 +181,15 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        
-        // 🟢 PROXY TUNNEL FOR PLAYBACK
-        // If the frontend tries to play the file, we tunnel that too
+        if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
+
+        // Use Proxy Shield for the video playback too if needed
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const response = await fetch(proxyUrl);
         
         reply.header("Access-Control-Allow-Origin", "*");
-        // Stream the data back
         const buffer = await response.arrayBuffer();
         reply.send(Buffer.from(buffer));
-        
     } catch (e) { reply.status(500).send({ error: "Proxy Error" }); }
   });
 };
