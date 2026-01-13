@@ -8,10 +8,10 @@ const PROXIES = [
     "https://api.allorigins.win/raw?url="
 ];
 
-// 🟢 BASE URL for your Render Server (Used for wrapping images)
 const SERVER_URL = "https://anime-server-xzlh.onrender.com/anime/animepahe/proxy?url=";
 
-async function fetchShield(targetUrl: string) {
+async function fetchShield(targetUrl: string, validationKeyword: string = "html") {
+    // 1. Try Direct
     try {
         const res = await fetch(targetUrl, {
             headers: {
@@ -20,15 +20,21 @@ async function fetchShield(targetUrl: string) {
                 'Accept-Language': 'en-US,en;q=0.9'
             }
         });
-        if (res.ok) return await res.text();
+        if (res.ok) {
+            const text = await res.text();
+            // 🟢 STRICT VALIDATION: Only accept if it contains what we expect (e.g. "anime_info_body")
+            if (text.includes(validationKeyword)) return text;
+        }
     } catch (e) {}
 
+    // 2. Try Proxy Wall
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
             if (res.ok) {
                 const text = await res.text();
-                if (text.includes("<html") && text.length > 500) return text;
+                // 🟢 STRICT VALIDATION
+                if (text.includes(validationKeyword)) return text;
             }
         } catch (e) {}
     }
@@ -46,7 +52,8 @@ class CustomGogo {
         for (const domain of this.mirrors) {
             try {
                 const searchUrl = `${domain}/search.html?keyword=${encodeURIComponent(query)}`;
-                const html = await fetchShield(searchUrl);
+                // Validate that we got a search result page
+                const html = await fetchShield(searchUrl, "last_episodes");
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
@@ -58,10 +65,8 @@ class CustomGogo {
                     let img = $(el).find('.img a img').attr('src');
                     const releaseDate = $(el).find('.released').text().trim();
                     
-                    // 🟢 FIX: Proxy the Image URL
                     if (img) {
                         if (!img.startsWith('http')) img = `https://gogocdn.net${img}`;
-                        // Wrap it in our proxy to bypass 403 Forbidden
                         img = `${SERVER_URL}${encodeURIComponent(img)}`;
                     }
 
@@ -84,9 +89,7 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // Smart ID Cleaner
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
-        
         console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
 
         // Attempt 1: Direct Lookup
@@ -105,14 +108,16 @@ class CustomGogo {
         }
 
         if (foundInfo) return foundInfo;
-        throw new Error("Gogo Info Failed");
+        throw new Error("Gogo Info Failed - Could not bypass protection");
     }
 
     async scrapeInfoPage(id: string) {
         for (const domain of this.mirrors) {
             try {
-                const html = await fetchShield(`${domain}/category/${id}`);
-                if (!html || html.includes("404 Not Found") || !html.includes("anime_info_body_bg")) continue;
+                // 🟢 KEY FIX: We verify the page contains "anime_info_body_bg"
+                // If it's a Cloudflare block page, this will fail, and we try the next mirror/proxy.
+                const html = await fetchShield(`${domain}/category/${id}`, "anime_info_body_bg");
+                if (!html) continue;
 
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
@@ -122,7 +127,6 @@ class CustomGogo {
                 const desc = $('.anime_info_body_bg .description').text().trim();
                 let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
-                // 🟢 FIX: Proxy the Image URL
                 if (image) {
                     if (!image.startsWith('http')) image = `https://gogocdn.net${image}`;
                     image = `${SERVER_URL}${encodeURIComponent(image)}`;
@@ -132,7 +136,9 @@ class CustomGogo {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
                     
                     const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                    const listHtml = await fetchShield(ajaxUrl);
+                    // Ajax lists are simple HTML, so we validate for "li" tags
+                    const listHtml = await fetchShield(ajaxUrl, "li");
+                    
                     const $ep = cheerio.load(listHtml);
                     const episodes: any[] = [];
                     
@@ -166,8 +172,8 @@ class CustomGogo {
         ];
 
         for (const url of downloadMirrors) {
-            console.log(chalk.gray(`      Trying download page: ${url}`));
-            const html = await fetchShield(url);
+            // Validate for "download" keyword in the page body
+            const html = await fetchShield(url, "download");
             if (!html) continue;
 
             const $ = cheerio.load(html);
@@ -224,8 +230,6 @@ const routes = async (fastify: FastifyInstance, options: any) => {
     try {
         const { url } = req.query;
         if (!url) return reply.status(400).send("Missing URL");
-        
-        // Allow images to pass through
         if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
 
         const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
