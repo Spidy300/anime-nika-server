@@ -14,7 +14,8 @@ async function fetchShield(targetUrl: string) {
         const res = await fetch(targetUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://gogoanimes.fi/'
+                'Referer': 'https://gogoanimes.fi/',
+                'Accept-Language': 'en-US,en;q=0.9'
             }
         });
         if (res.ok) return await res.text();
@@ -23,7 +24,6 @@ async function fetchShield(targetUrl: string) {
     // 2. Try Proxy Wall
     for (const proxy of PROXIES) {
         try {
-            // console.log(chalk.gray(`      🛡️ Tunneling via: ${proxy}`));
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
             if (res.ok) {
                 const text = await res.text();
@@ -38,11 +38,9 @@ class CustomGogo {
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
     async search(query: string) {
-        // Simple search that returns a list
         return this.internalSearch(query);
     }
 
-    // Helper for search logic
     async internalSearch(query: string) {
         for (const domain of this.mirrors) {
             try {
@@ -61,7 +59,7 @@ class CustomGogo {
                     
                     if (title && link) {
                         results.push({
-                            id: link.replace('/category/', '').trim(), // Extract clean ID
+                            id: link.replace('/category/', '').trim(), 
                             title: title,
                             image: img,
                             releaseDate: releaseDate
@@ -78,23 +76,31 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        let targetId = id;
-        let foundInfo = null;
+        // 🟢 SMART ID CLEANER
+        // 1. Remove "-episode-X" pattern
+        // 2. Remove trailing numbers (e.g. "naruto-shippuden-355" -> "naruto-shippuden")
+        let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
+        
+        console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
 
-        // 🟢 ATTEMPT 1: Direct Category Lookup
-        foundInfo = await this.scrapeInfoPage(targetId);
+        // 🟢 ATTEMPT 1: Direct Lookup with Clean ID
+        let foundInfo = await this.scrapeInfoPage(cleanId);
 
-        // 🟢 ATTEMPT 2: Self-Healing (Search Fallback)
-        // If direct lookup failed (404), maybe the ID is wrong (e.g. "naruto-shippuden-355")
+        // 🟢 ATTEMPT 2: Fallback to Raw ID (Just in case the anime actually has a number in title)
+        if (!foundInfo && cleanId !== id) {
+             console.log(chalk.yellow(`      Clean ID failed. Retrying with raw ID: ${id}`));
+             foundInfo = await this.scrapeInfoPage(id);
+        }
+
+        // 🟢 ATTEMPT 3: Search Fallback
         if (!foundInfo) {
-            console.log(chalk.yellow(`      ⚠️ Direct lookup failed. searching for "${id}"...`));
-            const searchData = await this.internalSearch(id.replace(/-/g, " "));
+            console.log(chalk.yellow(`      Direct lookups failed. Searching for "${cleanId}"...`));
+            const searchData = await this.internalSearch(cleanId.replace(/-/g, " "));
             
             if (searchData.results && searchData.results.length > 0) {
-                // Take the first result as the correct Anime ID
-                targetId = searchData.results[0].id;
-                console.log(chalk.green(`      🎉 Self-Healed ID: ${id} -> ${targetId}`));
-                foundInfo = await this.scrapeInfoPage(targetId);
+                const bestMatch = searchData.results[0].id;
+                console.log(chalk.green(`      🎉 Found via Search: ${bestMatch}`));
+                foundInfo = await this.scrapeInfoPage(bestMatch);
             }
         }
 
@@ -106,7 +112,8 @@ class CustomGogo {
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/category/${id}`);
-                if (!html || html.includes("404 Not Found")) continue;
+                // Strict check: valid HTML + not a 404 page
+                if (!html || html.includes("404 Not Found") || !html.includes("anime_info_body_bg")) continue;
 
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
@@ -147,7 +154,6 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 PROXY TANK: Download Page Attack
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
             `https://gogoanimes.fi/download?id=${episodeId}`,
@@ -179,9 +185,8 @@ class CustomGogo {
             }
         }
 
-        // 🟢 FALLBACK: Raw Embed
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Extraction failed. Returning fallback: ${fallbackUrl}`));
+        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning raw embed: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -205,12 +210,11 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Legacy/Default Routes
+  // Default routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
 
-  // Proxy Tunnel for Video
   fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
     try {
         const { url } = req.query;
