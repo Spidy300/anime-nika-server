@@ -16,6 +16,7 @@ async function fetchShield(targetUrl: string) {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': 'https://gogoanimes.fi/',
+                'X-Requested-With': 'XMLHttpRequest' // 🟢 Added for AJAX stability
             }
         });
         if (res.ok) return await res.text();
@@ -71,8 +72,7 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // 🟢 AGGRESSIVE ID CLEANING
-        // Fixes "naruto-shippuden-355" -> "naruto-shippuden"
+        // ID Cleaning
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
         console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
 
@@ -107,8 +107,22 @@ class CustomGogo {
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id}`));
-                    const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                    const listHtml = await fetchShield(ajaxUrl);
+                    
+                    // 🟢 ENHANCED AJAX LIST
+                    // We prioritize the domain's own ajax endpoint to avoid cross-origin blocks
+                    const ajaxDomains = [
+                        `${domain}/ajax`,
+                        "https://ajax.gogo-load.com/ajax",
+                        "https://ajax.gogocdn.net/ajax"
+                    ];
+
+                    let listHtml = "";
+                    for (const ajaxBase of ajaxDomains) {
+                        const ajaxUrl = `${ajaxBase}/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                        listHtml = await fetchShield(ajaxUrl);
+                        if (listHtml) break;
+                    }
+
                     if (listHtml) {
                         const $ep = cheerio.load(listHtml);
                         const episodes: any[] = [];
@@ -118,6 +132,7 @@ class CustomGogo {
                             const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
                             if (epId) episodes.push({ id: epId, number: Number(epNum) });
                         });
+                        console.log(chalk.green(`      🎉 Found ${episodes.length} episodes`));
                         return { id, title, image, description: desc, episodes: episodes.reverse() };
                     }
                 }
@@ -129,27 +144,22 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 🟢 STRATEGY 1: PROXY SCRAPE
+        // 1. Local Scrape (Best Quality)
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
                 if (!html) continue;
                 const $ = cheerio.load(html);
 
-                // Try to find specific "Download" links first (Easiest)
                 let downloadLink = $('.dowload a').attr('href');
                 if (downloadLink && downloadLink.includes('.mp4')) {
                      console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
                      return { sources: [{ url: downloadLink, quality: 'default', isM3U8: false }] };
                 }
 
-                // Try to find the Embed
                 let embedUrl = $('iframe').first().attr('src') || $('.anime_muti_link ul li.vidcdn a').attr('data-video');
                 if (embedUrl) {
                     if (embedUrl.startsWith('//')) embedUrl = `https:${embedUrl}`;
-                    console.log(chalk.gray(`      Found Embed: ${embedUrl}`));
-                    
-                    // Try to dig into the embed
                     const playerHtml = await fetchShield(embedUrl);
                     const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/);
                     if (m3u8Match && m3u8Match[1]) {
@@ -160,24 +170,24 @@ class CustomGogo {
             } catch(e) {}
         }
 
-        // 🟢 STRATEGY 2: EXTERNAL BACKUP (The "Master Key")
-        // If local scraping fails, we ask a public API to do it for us.
+        // 🟢 2. NEW BACKUP: AMVStream API
+        // Replaces the broken Consumet API
         try {
-            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling Backup API...`));
-            const backupUrl = `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`;
+            console.log(chalk.yellow(`      ⚠️ Local scrape failed. Calling AMVStr API...`));
+            const backupUrl = `https://api.amvstr.me/api/v2/stream/${episodeId}`;
             const res = await fetch(backupUrl);
-            const data = await res.json();
+            const data = await res.json() as any;
             
-            if (data.sources && data.sources.length > 0) {
-                const best = data.sources.find((s:any) => s.quality === 'default') || data.sources[0];
-                console.log(chalk.green(`      🎉 BACKUP API SUCCESS: ${best.url}`));
-                return { sources: [{ url: best.url, quality: 'default', isM3U8: true }] };
+            if (data && data.stream && data.stream.multi && data.stream.multi.main) {
+                const url = data.stream.multi.main.url;
+                console.log(chalk.green(`      🎉 AMVSTR SUCCESS: ${url}`));
+                return { sources: [{ url: url, quality: 'default', isM3U8: true }] };
             }
         } catch(e) {
-            console.log(chalk.red(`      Backup API failed: ${e}`));
+            console.log(chalk.red(`      AMVStr failed: ${e}`));
         }
 
-        // Final Fallback
+        // Fallback
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
