@@ -2,24 +2,36 @@ import { FastifyRequest, FastifyInstance, FastifyReply } from 'fastify';
 import chalk from 'chalk';
 import * as cheerio from 'cheerio';
 
-// 🟢 PUBLIC PROXIES (For Local Scrape)
+// 🟢 USER-AGENT ROTATION (To look like real devices)
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.2 Mobile/15E148 Safari/604.1'
+];
+
 const PROXIES = [
     "https://corsproxy.io/?",
     "https://api.codetabs.com/v1/proxy?quest=",
     "https://api.allorigins.win/raw?url="
 ];
 
+// Helper to fetch using proxies and random agents
 async function fetchShield(targetUrl: string) {
+    const randomAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    
+    // 1. Try Direct
     try {
         const res = await fetch(targetUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': randomAgent,
                 'Referer': 'https://gogoanimes.fi/',
+                'X-Requested-With': 'XMLHttpRequest'
             }
         });
         if (res.ok) return await res.text();
     } catch (e) {}
 
+    // 2. Try Proxies
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
@@ -130,13 +142,14 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
-        // 1. LOCAL SCRAPE (Best Quality)
+        // 🟢 1. TITAN LOCAL SCRAPE (Advanced Regex)
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/${episodeId}`);
                 if (!html) continue;
                 const $ = cheerio.load(html);
 
+                // Direct download links (easiest)
                 let downloadLink = $('.dowload a').attr('href');
                 if (downloadLink && downloadLink.includes('.mp4')) {
                      console.log(chalk.green(`      🎉 FOUND MP4: ${downloadLink}`));
@@ -147,54 +160,51 @@ class CustomGogo {
                 let embedUrl = $('iframe').first().attr('src') || $('.anime_muti_link ul li.vidcdn a').attr('data-video');
                 if (embedUrl) {
                     if (embedUrl.startsWith('//')) embedUrl = `https:${embedUrl}`;
+                    console.log(chalk.gray(`      Found Embed: ${embedUrl}`));
+                    
                     const playerHtml = await fetchShield(embedUrl);
-                    const m3u8Match = playerHtml.match(/file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/);
-                    if (m3u8Match && m3u8Match[1]) {
-                        console.log(chalk.green(`      🎉 EXTRACTED M3U8: ${m3u8Match[1]}`));
-                        return { sources: [{ url: m3u8Match[1], quality: 'default', isM3U8: true }] };
+                    
+                    // 🟢 MEGA REGEX PACK (Catches newplayer.php, jwplayer, and others)
+                    const patterns = [
+                        /file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/,
+                        /source:\s*\[\s*{\s*file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/,
+                        /"file":\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/,
+                        /sources:\s*\[\s*{\s*file:\s*['"](https?:\/\/[^"']+\.m3u8[^"']*)['"]/
+                    ];
+
+                    for (const pattern of patterns) {
+                        const match = playerHtml.match(pattern);
+                        if (match && match[1]) {
+                            console.log(chalk.green(`      🎉 TITAN EXTRACT: ${match[1]}`));
+                            return { sources: [{ url: match[1], quality: 'default', isM3U8: true }] };
+                        }
                     }
                 }
             } catch(e) {}
         }
 
-        // 🟢 2. HYDRA BACKUP SYSTEM (Try 3 APIs in order)
+        // 🟢 2. COMMUNITY MIRRORS (Less Blocked)
         const BACKUP_APIS = [
-            `https://consumet-api-drab.vercel.app/anime/gogoanime/watch/${episodeId}`, // Backup 1 (Consumet Mirror)
-            `https://api.amvstr.me/api/v2/stream/${episodeId}`,                       // Backup 2 (AmvStr)
-            `https://api.consumet.org/anime/gogoanime/watch/${episodeId}`             // Backup 3 (Original)
+            `https://consumet-api-clone.vercel.app/anime/gogoanime/watch/${episodeId}`, // Backup 1
+            `https://api-consumet.vercel.app/anime/gogoanime/watch/${episodeId}`,       // Backup 2
+            `https://c.delusionz.xyz/anime/gogoanime/watch/${episodeId}`                // Backup 3 (Community)
         ];
 
-        console.log(chalk.yellow(`      ⚠️ Local scrape failed. Engaging Hydra Backups...`));
+        console.log(chalk.yellow(`      ⚠️ Local scrape failed. Engaging Backups...`));
 
         for (const apiUrl of BACKUP_APIS) {
             try {
                 console.log(chalk.gray(`      Trying API: ${apiUrl}`));
-                const res = await fetch(apiUrl, { 
-                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } // Fake browser
-                });
-                
+                const res = await fetch(apiUrl);
                 if (!res.ok) continue;
 
                 const data = await res.json() as any;
-                let finalUrl = "";
-
-                // Handle Different API Formats
-                if (data.sources) {
-                    // Consumet Format
+                if (data.sources && data.sources.length > 0) {
                     const best = data.sources.find((s:any) => s.quality === 'default' || s.quality === '1080p') || data.sources[0];
-                    if (best) finalUrl = best.url;
-                } else if (data.stream && data.stream.multi && data.stream.multi.main) {
-                    // AmvStr Format
-                    finalUrl = data.stream.multi.main.url;
+                    console.log(chalk.green(`      🎉 BACKUP SUCCESS: ${best.url}`));
+                    return { sources: [{ url: best.url, quality: 'default', isM3U8: true }] };
                 }
-
-                if (finalUrl) {
-                    console.log(chalk.green(`      🎉 HYDRA SUCCESS: ${finalUrl}`));
-                    return { sources: [{ url: finalUrl, quality: 'default', isM3U8: true }] };
-                }
-            } catch(e) {
-                console.log(chalk.red(`      API Failed: ${e}`));
-            }
+            } catch(e) {}
         }
 
         // Final Fallback
@@ -218,6 +228,7 @@ const routes = async (fastify: FastifyInstance, options: any) => {
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
   
+  // Default Routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
