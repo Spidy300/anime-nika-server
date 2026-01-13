@@ -8,33 +8,29 @@ const PROXIES = [
     "https://api.allorigins.win/raw?url="
 ];
 
-const SERVER_URL = "https://anime-server-xzlh.onrender.com/anime/animepahe/proxy?url=";
-
-async function fetchShield(targetUrl: string, validationKeyword: string = "html") {
+// Helper to fetch using proxies
+async function fetchShield(targetUrl: string, validationKeyword?: string) {
     // 1. Try Direct
     try {
         const res = await fetch(targetUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Referer': 'https://gogoanimes.fi/',
-                'Accept-Language': 'en-US,en;q=0.9'
             }
         });
         if (res.ok) {
             const text = await res.text();
-            // 🟢 STRICT VALIDATION: Only accept if it contains what we expect (e.g. "anime_info_body")
-            if (text.includes(validationKeyword)) return text;
+            if (!validationKeyword || text.includes(validationKeyword)) return text;
         }
     } catch (e) {}
 
-    // 2. Try Proxy Wall
+    // 2. Try Proxies
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
             if (res.ok) {
                 const text = await res.text();
-                // 🟢 STRICT VALIDATION
-                if (text.includes(validationKeyword)) return text;
+                if (!validationKeyword || text.includes(validationKeyword)) return text;
             }
         } catch (e) {}
     }
@@ -44,32 +40,23 @@ async function fetchShield(targetUrl: string, validationKeyword: string = "html"
 class CustomGogo {
     mirrors = ["https://anitaku.pe", "https://gogoanimes.fi", "https://gogoanime3.co"];
     
-    async search(query: string) {
-        return this.internalSearch(query);
-    }
+    // ... search logic remains same ...
+    async search(query: string) { return this.internalSearch(query); }
 
     async internalSearch(query: string) {
         for (const domain of this.mirrors) {
             try {
                 const searchUrl = `${domain}/search.html?keyword=${encodeURIComponent(query)}`;
-                // Validate that we got a search result page
                 const html = await fetchShield(searchUrl, "last_episodes");
                 if (!html) continue;
 
                 const $ = cheerio.load(html);
                 const results: any[] = [];
-
                 $('.last_episodes ul li').each((i, el) => {
                     const title = $(el).find('.name a').text().trim();
                     const link = $(el).find('.name a').attr('href');
                     let img = $(el).find('.img a img').attr('src');
                     const releaseDate = $(el).find('.released').text().trim();
-                    
-                    if (img) {
-                        if (!img.startsWith('http')) img = `https://gogocdn.net${img}`;
-                        img = `${SERVER_URL}${encodeURIComponent(img)}`;
-                    }
-
                     if (title && link) {
                         results.push({
                             id: link.replace('/category/', '').trim(), 
@@ -79,7 +66,6 @@ class CustomGogo {
                         });
                     }
                 });
-
                 if (results.length > 0) return { results };
             } catch (e) {}
         }
@@ -88,34 +74,27 @@ class CustomGogo {
 
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
-        
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
-        console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
-
-        // Attempt 1: Direct Lookup
+        
         let foundInfo = await this.scrapeInfoPage(cleanId);
-
-        // Attempt 2: Search Fallback
+        
+        if (!foundInfo && cleanId !== id) foundInfo = await this.scrapeInfoPage(id);
+        
         if (!foundInfo) {
-            console.log(chalk.yellow(`      Direct lookup failed. Searching for "${cleanId}"...`));
+            console.log(chalk.yellow(`      Direct lookups failed. Searching...`));
             const searchData = await this.internalSearch(cleanId.replace(/-/g, " "));
-            
             if (searchData.results && searchData.results.length > 0) {
-                const bestMatch = searchData.results[0].id;
-                console.log(chalk.green(`      🎉 Found via Search: ${bestMatch}`));
-                foundInfo = await this.scrapeInfoPage(bestMatch);
+                foundInfo = await this.scrapeInfoPage(searchData.results[0].id);
             }
         }
 
         if (foundInfo) return foundInfo;
-        throw new Error("Gogo Info Failed - Could not bypass protection");
+        throw new Error("Gogo Info Failed");
     }
 
     async scrapeInfoPage(id: string) {
         for (const domain of this.mirrors) {
             try {
-                // 🟢 KEY FIX: We verify the page contains "anime_info_body_bg"
-                // If it's a Cloudflare block page, this will fail, and we try the next mirror/proxy.
                 const html = await fetchShield(`${domain}/category/${id}`, "anime_info_body_bg");
                 if (!html) continue;
 
@@ -127,77 +106,66 @@ class CustomGogo {
                 const desc = $('.anime_info_body_bg .description').text().trim();
                 let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
 
-                if (image) {
-                    if (!image.startsWith('http')) image = `https://gogocdn.net${image}`;
-                    image = `${SERVER_URL}${encodeURIComponent(image)}`;
-                }
+                if (image && !image.startsWith('http')) image = `https://gogocdn.net${image}`;
 
                 if (movie_id) {
-                    console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
+                    console.log(chalk.green(`      ✅ Found movie_id: ${movie_id}`));
                     
-                    const ajaxUrl = `https://ajax.gogo-load.com/ajax/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
-                    // Ajax lists are simple HTML, so we validate for "li" tags
-                    const listHtml = await fetchShield(ajaxUrl, "li");
-                    
-                    const $ep = cheerio.load(listHtml);
-                    const episodes: any[] = [];
-                    
-                    $ep('li').each((i, el) => {
-                        let epId = $ep(el).find('a').attr('href')?.trim() || "";
-                        epId = epId.replace(/^\//, ''); 
-                        const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
-                        if (epId) episodes.push({ id: epId, number: Number(epNum) });
-                    });
+                    // 🟢 EPISODE LIST FIX: Try multiple AJAX domains
+                    const ajaxDomains = [
+                        "https://ajax.gogo-load.com/ajax",
+                        "https://ajax.gogocdn.net/ajax",
+                        `${domain}/ajax`
+                    ];
 
-                    return { 
-                        id: id, 
-                        title: title, 
-                        image: image, 
-                        description: desc,
-                        episodes: episodes.reverse() 
-                    };
+                    let listHtml = "";
+                    for (const ajaxBase of ajaxDomains) {
+                        const ajaxUrl = `${ajaxBase}/load-list-episode?ep_start=0&ep_end=${ep_end}&id=${movie_id}&default_ep=0&alias=${alias}`;
+                        console.log(chalk.gray(`      Trying AJAX: ${ajaxBase}`));
+                        listHtml = await fetchShield(ajaxUrl, "li");
+                        if (listHtml) break; // Stop if we got the list
+                    }
+
+                    if (listHtml) {
+                        const $ep = cheerio.load(listHtml);
+                        const episodes: any[] = [];
+                        $ep('li').each((i, el) => {
+                            let epId = $ep(el).find('a').attr('href')?.trim() || "";
+                            epId = epId.replace(/^\//, ''); 
+                            const epNum = $ep(el).find('.name').text().replace('EP ', '').trim();
+                            if (epId) episodes.push({ id: epId, number: Number(epNum) });
+                        });
+                        console.log(chalk.green(`      🎉 Found ${episodes.length} episodes`));
+                        return { id, title, image, description: desc, episodes: episodes.reverse() };
+                    }
                 }
             } catch(e) {}
         }
         return null;
     }
 
+    // ... fetchEpisodeSources remains the same (Proxy Tank) ...
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
-
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
-            `https://gogoanimes.fi/download?id=${episodeId}`,
-            `https://gogohd.net/download?id=${episodeId}`
+            `https://gogoanimes.fi/download?id=${episodeId}`
         ];
-
         for (const url of downloadMirrors) {
-            // Validate for "download" keyword in the page body
             const html = await fetchShield(url, "download");
             if (!html) continue;
-
             const $ = cheerio.load(html);
             let bestUrl = "";
-
             $('.mirror_link .dowload a, .dowload a').each((i, el) => {
                 const href = $(el).attr('href');
                 const text = $(el).text().trim().toUpperCase();
-                
-                if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP"))) {
-                    if (href.startsWith("http")) {
-                        if (!bestUrl || text.includes("1080")) bestUrl = href;
-                    }
+                if (href && (text.includes("DOWNLOAD") || text.includes("MP4") || text.includes("HDP")) && href.startsWith("http")) {
+                    if (!bestUrl || text.includes("1080")) bestUrl = href;
                 }
             });
-
-            if (bestUrl) {
-                console.log(chalk.green(`      🎉 PROXY SUCCESS: ${bestUrl}`));
-                return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
-            }
+            if (bestUrl) return { sources: [{ url: bestUrl, quality: 'default', isM3U8: false }] };
         }
-
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning fallback: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
@@ -207,39 +175,20 @@ const customGogo = new CustomGogo();
 const routes = async (fastify: FastifyInstance, options: any) => {
   const safeRun = async (providerName: string, fn: () => Promise<any>, reply: any) => {
     try {
-        console.log(chalk.blue(`[${providerName}] Running...`));
         const res = await fn();
-        console.log(chalk.green(`   -> Success`));
         return reply.send(res);
     } catch (e: any) {
-        console.error(chalk.red(`   -> Error:`), e.message);
+        console.error(chalk.red(`Error:`), e.message);
         return reply.status(200).send({ error: e.message, results: [] });
     }
   };
-
   fastify.get('/gogo/search/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/gogo/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/gogo/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
-
-  // Default routes
+  // Default Routes
   fastify.get('/:query', (req: any, res) => safeRun('Gogo', () => customGogo.search(req.params.query), res));
   fastify.get('/info/:id', (req: any, res) => safeRun('Gogo', () => customGogo.fetchAnimeInfo(req.params.id), res));
   fastify.get('/watch/:episodeId', (req: any, res) => safeRun('Gogo', () => customGogo.fetchEpisodeSources(req.params.episodeId), res));
-
-  fastify.get('/proxy', async (req: any, reply: FastifyReply) => {
-    try {
-        const { url } = req.query;
-        if (!url) return reply.status(400).send("Missing URL");
-        if (url.includes('.php') || url.includes('.html')) return reply.status(400).send("Invalid Video");
-
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-        const response = await fetch(proxyUrl);
-        
-        reply.header("Access-Control-Allow-Origin", "*");
-        const buffer = await response.arrayBuffer();
-        reply.send(Buffer.from(buffer));
-    } catch (e) { reply.status(500).send({ error: "Proxy Error" }); }
-  });
 };
 
 export default routes;
