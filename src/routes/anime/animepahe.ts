@@ -9,7 +9,6 @@ const PROXIES = [
 ];
 
 async function fetchShield(targetUrl: string) {
-    // 1. Try Direct (Fastest)
     try {
         const res = await fetch(targetUrl, {
             headers: {
@@ -21,7 +20,6 @@ async function fetchShield(targetUrl: string) {
         if (res.ok) return await res.text();
     } catch (e) {}
 
-    // 2. Try Proxy Wall
     for (const proxy of PROXIES) {
         try {
             const res = await fetch(`${proxy}${encodeURIComponent(targetUrl)}`);
@@ -54,9 +52,12 @@ class CustomGogo {
                 $('.last_episodes ul li').each((i, el) => {
                     const title = $(el).find('.name a').text().trim();
                     const link = $(el).find('.name a').attr('href');
-                    const img = $(el).find('.img a img').attr('src');
+                    let img = $(el).find('.img a img').attr('src');
                     const releaseDate = $(el).find('.released').text().trim();
                     
+                    // 🟢 FIX: Ensure Image is Absolute
+                    if (img && !img.startsWith('http')) img = `https://gogocdn.net${img}`; // Default to GogoCDN
+
                     if (title && link) {
                         results.push({
                             id: link.replace('/category/', '').trim(), 
@@ -76,23 +77,20 @@ class CustomGogo {
     async fetchAnimeInfo(id: string) {
         console.log(chalk.blue(`   -> Gogo: Hunting for info on ${id}...`));
         
-        // 🟢 SMART ID CLEANER
-        // 1. Remove "-episode-X" pattern
-        // 2. Remove trailing numbers (e.g. "naruto-shippuden-355" -> "naruto-shippuden")
+        // 🟢 SMART ID CLEANER (Fixes the "naruto-shippuden-355" error)
         let cleanId = id.replace(/-episode-\d+$/, '').replace(/-\d+$/, '');
         
         console.log(chalk.gray(`      Cleaning ID: ${id} -> ${cleanId}`));
 
-        // 🟢 ATTEMPT 1: Direct Lookup with Clean ID
+        // Attempt 1: Direct Lookup
         let foundInfo = await this.scrapeInfoPage(cleanId);
 
-        // 🟢 ATTEMPT 2: Fallback to Raw ID (Just in case the anime actually has a number in title)
+        // Attempt 2: Raw ID Fallback
         if (!foundInfo && cleanId !== id) {
-             console.log(chalk.yellow(`      Clean ID failed. Retrying with raw ID: ${id}`));
              foundInfo = await this.scrapeInfoPage(id);
         }
 
-        // 🟢 ATTEMPT 3: Search Fallback
+        // Attempt 3: Search Fallback
         if (!foundInfo) {
             console.log(chalk.yellow(`      Direct lookups failed. Searching for "${cleanId}"...`));
             const searchData = await this.internalSearch(cleanId.replace(/-/g, " "));
@@ -112,16 +110,18 @@ class CustomGogo {
         for (const domain of this.mirrors) {
             try {
                 const html = await fetchShield(`${domain}/category/${id}`);
-                // Strict check: valid HTML + not a 404 page
                 if (!html || html.includes("404 Not Found") || !html.includes("anime_info_body_bg")) continue;
 
                 const $ = cheerio.load(html);
                 const movie_id = $('#movie_id').attr('value');
                 const alias = $('#alias_anime').attr('value');
                 const title = $('.anime_info_body_bg h1').text().trim();
-                const image = $('.anime_info_body_bg img').attr('src');
+                let image = $('.anime_info_body_bg img').attr('src');
                 const desc = $('.anime_info_body_bg .description').text().trim();
                 let ep_end = $('#episode_page a').last().attr('ep_end') || "2000";
+
+                // 🟢 FIX: Ensure Image is Absolute
+                if (image && !image.startsWith('http')) image = `https://gogocdn.net${image}`;
 
                 if (movie_id) {
                     console.log(chalk.green(`      ✅ Found movie_id: ${movie_id} on ${domain}`));
@@ -154,6 +154,7 @@ class CustomGogo {
     async fetchEpisodeSources(episodeId: string) {
         console.log(chalk.blue(`   -> Gogo: Fetching source for ${episodeId}...`));
 
+        // Proxy Tank Strategy
         const downloadMirrors = [
             `https://anitaku.pe/download?id=${episodeId}`,
             `https://gogoanimes.fi/download?id=${episodeId}`,
@@ -186,7 +187,7 @@ class CustomGogo {
         }
 
         const fallbackUrl = `https://embtaku.pro/streaming.php?id=${episodeId.split('-').pop()}`;
-        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning raw embed: ${fallbackUrl}`));
+        console.log(chalk.yellow(`      ⚠️ Proxy scan failed. Returning fallback: ${fallbackUrl}`));
         return { sources: [{ url: fallbackUrl, quality: 'iframe', isM3U8: false }] };
     }
 }
